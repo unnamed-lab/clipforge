@@ -1,0 +1,14 @@
+packages:
+  - "apps/web"
+  - "packages/*"
+
+# pnpm 12 reads its settings from this file, not package.json.
+# Explicit approvals only: these are the dependencies whose install scripts we
+# have reviewed (native binaries for the bundler, Tailwind's oxide engine and sharp).
+# Anything else that ships an install script fails the install instead of running silently.
+allowBuilds:
+  "@parcel/watcher": true
+  "@tailwindcss/oxide": true
+  esbuild: true
+  sharp: true
+  unrs-resolver: true

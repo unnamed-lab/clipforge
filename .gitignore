@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.next/
+out/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Runtime data: media, database, models, logs, tokens
+data/*
+!data/.gitkeep
+apps/worker/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Test artefacts
+tests/fixtures/generated/
+.playwright-mcp/
+test-results/
+playwright-report/
+
+# Local env and secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
