@@ -1,0 +1,88 @@
+name: clipforge
+
+# Local integration stack. The web tier is stateless; the worker owns the single
+# writable data volume (SQLite, media, model cache). Do not scale the worker.
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: clipforge-worker:local
+    environment:
+      CLIPFORGE_DATA_DIR: /data
+      CLIPFORGE_WORKER_HOST: 0.0.0.0
+      CLIPFORGE_WORKER_PORT: "8788"
+      PORT: "8788"
+      CLIPFORGE_WORKER_TOKEN: ${CLIPFORGE_WORKER_TOKEN:?Set CLIPFORGE_WORKER_TOKEN in .env (see .env.example)}
+      CLIPFORGE_WHISPER_MODEL: ${CLIPFORGE_WHISPER_MODEL:-base}
+      CLIPFORGE_WHISPER_DEVICE: cpu
+      CLIPFORGE_WHISPER_COMPUTE_TYPE: int8
+      CLIPFORGE_DISK_RESERVE_MB: ${CLIPFORGE_DISK_RESERVE_MB:-1024}
+      CLIPFORGE_MAX_UPLOAD_MB: ${CLIPFORGE_MAX_UPLOAD_MB:-2048}
+      CLIPFORGE_LLM_ENABLED: "false"
+      CLIPFORGE_STORAGE_BACKEND: ${CLIPFORGE_STORAGE_BACKEND:-local}
+      CLIPFORGE_SUPABASE_URL: ${CLIPFORGE_SUPABASE_URL:-}
+      CLIPFORGE_SUPABASE_SERVICE_KEY: ${CLIPFORGE_SUPABASE_SERVICE_KEY:-}
+      CLIPFORGE_SUPABASE_BUCKET: ${CLIPFORGE_SUPABASE_BUCKET:-clipforge}
+      CLIPFORGE_SUPABASE_STORAGE_PREFIX: ${CLIPFORGE_SUPABASE_STORAGE_PREFIX:-/storage/v1}
+      CLIPFORGE_SUPABASE_TIMEOUT_SECONDS: ${CLIPFORGE_SUPABASE_TIMEOUT_SECONDS:-60}
+    # Set CLIPFORGE_SUPABASE_URL to a service the container can reach. If you
+    # run supabase/storage-api:latest directly, give the worker its service name
+    # and clear CLIPFORGE_SUPABASE_STORAGE_PREFIX.
+    volumes:
+      - clipforge-data:/data
+    expose:
+      - "8788"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/api/health', timeout=4)",
+        ]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: clipforge-web:local
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      CLIPFORGE_WORKER_URL: http://worker:8788
+      CLIPFORGE_WORKER_TOKEN: ${CLIPFORGE_WORKER_TOKEN:?Set CLIPFORGE_WORKER_TOKEN in .env (see .env.example)}
+    ports:
+      - "${CLIPFORGE_WEB_PORT:-3000}:3000"
+    depends_on:
+      worker:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+volumes:
+  clipforge-data:
+    # Named volume by default. For direct inspection on Linux/macOS, replace with:
+    #   driver_opts:
+    #     type: none
+    #     o: bind
+    #     device: ${PWD}/data
+    # Bind mounts must be writable by UID 1001.

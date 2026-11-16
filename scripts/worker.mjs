@@ -80,10 +80,14 @@ switch (command) {
     run(["-m", "pytest", ...passthrough]);
     break;
   }
+  case "lint":
+    console.log(`[worker] ${python} -m ruff check src tests`);
+    run(["-m", "ruff", "check", "src", "tests"]);
+    break;
   case "python":
     console.log(python);
     break;
   default:
-    console.error(`Unknown command "${command}". Use: dev | start | test | python`);
+    console.error(`Unknown command "${command}". Use: dev | start | test | lint | python`);
     process.exit(2);
 }

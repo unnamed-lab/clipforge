@@ -1,0 +1,12 @@
+* text=auto
+
+# Container entrypoints and Dockerfiles are copied byte-for-byte. CRLF in a
+# shell entrypoint produces a confusing "not found" error on Linux.
+*.sh text eol=lf
+docker/** text eol=lf
+apps/*/Dockerfile text eol=lf
+
+# Compose, Render and CI files are read on Linux.
+*.yaml text eol=lf
+*.yml text eol=lf
+*.mjs text eol=lf

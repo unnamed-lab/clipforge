@@ -1,0 +1,77 @@
+# Render Blueprint for Clipforge.
+#
+# Topology: one public Next.js web service (stateless) and one private worker
+# service that owns the only writable disk. Do not add a second worker instance:
+# SQLite, the job queue and the media store are single-writer.
+#
+# Approximate cost (Render list prices, subject to change): web Starter ~$7/mo,
+# worker Standard ~$25/mo, 20 GB disk ~$5/mo. Verify current pricing before
+# applying the Blueprint.
+services:
+  - type: web
+    name: clipforge-web
+    runtime: docker
+    plan: starter
+    numInstances: 1
+    dockerfilePath: ./apps/web/Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLIPFORGE_WORKER_URL
+        fromService:
+          type: pserv
+          name: clipforge-worker
+          property: hostport
+      - key: CLIPFORGE_WORKER_TOKEN
+        fromService:
+          type: pserv
+          name: clipforge-worker
+          envVarKey: CLIPFORGE_WORKER_TOKEN
+
+  - type: pserv
+    name: clipforge-worker
+    runtime: docker
+    plan: standard
+    numInstances: 1
+    dockerfilePath: ./apps/worker/Dockerfile
+    dockerContext: .
+    disk:
+      name: clipforge-data
+      mountPath: /data
+      sizeGB: 20
+    envVars:
+      - key: CLIPFORGE_WORKER_TOKEN
+        generateValue: true
+      - key: CLIPFORGE_DATA_DIR
+        value: /data
+      - key: CLIPFORGE_WORKER_HOST
+        value: 0.0.0.0
+      - key: CLIPFORGE_WHISPER_MODEL
+        value: base
+      - key: CLIPFORGE_WHISPER_DEVICE
+        value: cpu
+      - key: CLIPFORGE_WHISPER_COMPUTE_TYPE
+        value: int8
+      - key: CLIPFORGE_DISK_RESERVE_MB
+        value: "1024"
+      - key: CLIPFORGE_MAX_UPLOAD_MB
+        value: "2048"
+      - key: CLIPFORGE_LLM_ENABLED
+        value: "false"
+      # Default is local storage on the disk. To use Supabase Storage, change
+      # this to "supabase" and set the three values below as secrets in the
+      # Render dashboard. The bucket must exist and be private.
+      - key: CLIPFORGE_STORAGE_BACKEND
+        value: "local"
+      - key: CLIPFORGE_SUPABASE_URL
+        sync: false
+      - key: CLIPFORGE_SUPABASE_SERVICE_KEY
+        sync: false
+      - key: CLIPFORGE_SUPABASE_BUCKET
+        value: "clipforge"
+      # Hosted Supabase uses /storage/v1. Clear this only when pointing at a
+      # directly reachable supabase/storage-api container.
+      - key: CLIPFORGE_SUPABASE_STORAGE_PREFIX
+        value: "/storage/v1"

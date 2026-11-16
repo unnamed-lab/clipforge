@@ -9,7 +9,17 @@ import path from "node:path";
  * is read, so the token can never reach client JavaScript.
  */
 
-const WORKER_URL = (process.env.CLIPFORGE_WORKER_URL ?? "http://127.0.0.1:8788").replace(/\/+$/, "");
+const WORKER_URL = normaliseBaseUrl(process.env.CLIPFORGE_WORKER_URL ?? "http://127.0.0.1:8788");
+
+/**
+ * Render private services expose `host:port` without a scheme. Accept both forms
+ * so the same variable works locally (`http://127.0.0.1:8788`) and on Render.
+ */
+function normaliseBaseUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return "http://127.0.0.1:8788";
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
 
 export class WorkerError extends Error {
   readonly status: number;
@@ -51,7 +61,7 @@ export async function workerToken(): Promise<string> {
   }
 
   throw new WorkerError(
-    "The local processing worker is not running. Start it with `pnpm worker:dev` and reload this page.",
+    "The processing worker is not reachable. Start it locally with `pnpm worker:dev`, or check CLIPFORGE_WORKER_URL and the worker service.",
     503,
     "worker_unavailable",
   );
@@ -72,9 +82,9 @@ export async function workerRequest(pathname: string, init: RequestInit = {}): P
 
   try {
     return await fetch(url, { ...init, headers, cache: "no-store" });
-  } catch (error) {
+  } catch {
     throw new WorkerError(
-      `Could not reach the local worker at ${WORKER_URL}. Start it with \`pnpm worker:dev\`.`,
+      `Could not reach the processing worker at ${WORKER_URL}. Start it with \`pnpm worker:dev\` or check the service URL.`,
       503,
       "worker_unreachable",
     );

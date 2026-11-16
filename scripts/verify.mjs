@@ -5,7 +5,8 @@
  *
  *   node scripts/verify.mjs            typecheck, lint, unit tests, worker tests
  *   node scripts/verify.mjs --build    also run the production Next.js build
- *   node scripts/verify.mjs --slow     include worker tests marked slow/integration
+ *   node scripts/verify.mjs --docker   also build images and smoke-test Compose
+ *   node scripts/verify.mjs --slow     include worker tests marked slow
  */
 
 import { spawn } from "node:child_process";
@@ -18,6 +19,7 @@ const pnpm = isWindows ? "pnpm.cmd" : "pnpm";
 
 const flags = new Set(process.argv.slice(2));
 const includeBuild = flags.has("--build");
+const includeDocker = flags.has("--docker");
 const includeSlow = flags.has("--slow");
 
 /** @type {{name: string, command: string, args: string[], env?: Record<string,string>}[]} */
@@ -31,6 +33,11 @@ const steps = [
     name: "Web lint",
     command: pnpm,
     args: ["--filter", "@clipforge/web", "lint"],
+  },
+  {
+    name: "Worker lint",
+    command: "node",
+    args: ["scripts/worker.mjs", "lint"],
   },
   {
     name: "Shared tests",
@@ -57,6 +64,14 @@ if (includeBuild) {
   });
 }
 
+if (includeDocker) {
+  steps.push({
+    name: "Docker verification",
+    command: "node",
+    args: ["scripts/docker-verify.mjs"],
+  });
+}
+
 const results = [];
 
 function runStep(step) {
@@ -67,7 +82,10 @@ function runStep(step) {
       cwd: repoRoot,
       stdio: "inherit",
       env: { ...process.env, ...step.env },
-      shell: isWindows,
+      // pnpm is a .cmd shim on Windows and needs a shell. Node is a real
+      // executable; running it through the shell would split arguments that
+      // contain spaces, such as pytest's `-m "not slow"`.
+      shell: isWindows && step.command === pnpm,
     });
     child.on("error", (error) => {
       results.push({ name: step.name, ok: false, ms: Date.now() - started, detail: error.message });

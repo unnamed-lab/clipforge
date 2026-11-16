@@ -1,3 +1,4 @@
+import { workerPathFor } from "@/lib/proxy-path";
 import { errorMessage, workerRequest, WorkerError } from "@/lib/worker";
 
 /**
@@ -32,7 +33,15 @@ const DROPPED_RESPONSE_HEADERS = [
 async function handle(request: Request, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
   const url = new URL(request.url);
-  const target = `/${path.join("/")}${url.search}`;
+  let target: string;
+  try {
+    target = workerPathFor(path, url.search);
+  } catch {
+    return Response.json(
+      { error: { code: "invalid_path", message: "That API path is not valid." } },
+      { status: 400 },
+    );
+  }
 
   const headers = new Headers();
   for (const name of FORWARDED_REQUEST_HEADERS) {

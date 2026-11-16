@@ -17,6 +17,11 @@
     "typecheck": "pnpm --filter @clipforge/web typecheck",
     "test": "pnpm --filter @clipforge/web test",
     "test:worker": "node scripts/worker.mjs test",
+    "lint:worker": "node scripts/worker.mjs lint",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "verify:docker": "node scripts/docker-verify.mjs",
     "verify": "node scripts/verify.mjs"
   },
   "devDependencies": {
