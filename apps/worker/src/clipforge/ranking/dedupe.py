@@ -18,13 +18,19 @@ class SelectionResult:
 
 
 def _overlap_ratio(first: ScoredCandidate, second: ScoredCandidate) -> float:
+    """Share of the shorter clip that is covered by the longer one.
+
+    IoU alone misses containment: a 17 s window fully inside a 30 s window scores
+    below the threshold and both get kept. Measuring against the shorter span means
+    "one of these is essentially contained in the other" is always a duplicate.
+    """
     start = max(first.start_ms, second.start_ms)
     end = min(first.end_ms, second.end_ms)
     intersection = max(0, end - start)
     if intersection == 0:
         return 0.0
-    union = (first.end_ms - first.start_ms) + (second.end_ms - second.start_ms) - intersection
-    return intersection / union if union > 0 else 0.0
+    shortest = min(first.end_ms - first.start_ms, second.end_ms - second.start_ms)
+    return intersection / shortest if shortest > 0 else 0.0
 
 
 def _text_similarity(first: ScoredCandidate, second: ScoredCandidate) -> float:

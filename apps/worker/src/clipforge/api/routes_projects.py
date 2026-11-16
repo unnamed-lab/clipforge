@@ -4,8 +4,10 @@ from fastapi import APIRouter, Request
 
 from clipforge.api.deps import get_state
 from clipforge.api.models import ProjectCreate, ProjectPatch
+from clipforge.briefs.spec import ClippingBrief
 from clipforge.db.repositories import serialise_source
-from clipforge.errors import Conflict, NotFound
+from clipforge.errors import Conflict, NotFound, ValidationFailed
+from clipforge.storage.cleanup import delete_project_media
 from clipforge.storage.workspace import remove_project_workspace
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -14,7 +16,19 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 @router.post("")
 def create_project(payload: ProjectCreate, request: Request) -> dict:
     state = get_state(request)
-    project = state.repos.projects.create(name=payload.name.strip(), goals=payload.goals)
+    brief = None
+    if payload.brief:
+        try:
+            brief = ClippingBrief.model_validate(payload.brief).model_dump()
+        except ValueError as exc:
+            raise ValidationFailed(f"Brief is not valid: {exc}", code="invalid_brief") from exc
+    if payload.profile_id:
+        profile = state.repos.profiles.get(payload.profile_id)
+        if profile["archived"]:
+            raise ValidationFailed("That client profile is archived", code="profile_archived")
+    project = state.repos.projects.create(
+        name=payload.name.strip(), goals=payload.goals, profile_id=payload.profile_id, brief=brief
+    )
     return {"project": project}
 
 
@@ -70,6 +84,7 @@ def delete_project(project_id: str, request: Request) -> dict:
     active = state.repos.jobs.active_for(project_id, "analysis") or state.repos.jobs.active_for(project_id, "render")
     if active:
         raise Conflict("Stop the running job before deleting this project.")
+    delete_project_media(state.storage, state.repos, project_id)
     state.repos.projects.delete(project_id)
     remove_project_workspace(state.settings, project_id)
     return {"deleted": True, "project_id": project_id}

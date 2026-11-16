@@ -20,6 +20,7 @@ CRF = 20
 AUDIO_BITRATE = "160k"
 AUDIO_RATE = 48_000
 SILENCE_LABEL = "anullsrc=channel_layout=stereo:sample_rate=48000"
+LOGO_MARGIN = 48
 
 
 @dataclass
@@ -43,7 +44,7 @@ def _fps(spec: RenderSpec, source_fps: float | None) -> int:
 
 
 def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
-                   output_label: str, captions_name: str | None) -> str:
+                   output_label: str) -> str:
     if spec.video.framing == "blur":
         chain = (
             f"{input_label}split=2[bgsrc][fgsrc];"
@@ -60,16 +61,91 @@ def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
             f"{input_label}scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height},setsar=1"
         )
-    if captions_name:
-        chain += f",ass={captions_name}"
     return chain + f"[{output_label}]"
 
 
 def _audio_chain(spec: RenderSpec, input_label: str, output_label: str) -> str:
     parts = [f"aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo", "asetpts=PTS-STARTPTS"]
+    if spec.audio.denoise:
+        parts.append("afftdn=nr=12:nf=-30")
+    if spec.audio.dialogue_enhance:
+        parts.append("equalizer=f=180:t=q:w=1:g=2,equalizer=f=3000:t=q:w=1.4:g=3,dynaudnorm=f=200:g=15")
     if spec.audio.normalize:
         parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
     return f"{input_label}{','.join(parts)}[{output_label}]"
+
+
+def _logo_position(spec: RenderSpec, width: int, height: int) -> tuple[str, str]:
+    logo = spec.logo
+    margin = logo.margin_px
+    if logo.position == "top-left":
+        return str(margin), str(margin)
+    if logo.position == "bottom-left":
+        return str(margin), f"H-h-{margin}"
+    if logo.position == "bottom-right":
+        return f"W-w-{margin}", f"H-h-{margin}"
+    if logo.position == "custom":
+        return f"(W-w)*{logo.custom_x_pct / 100:.4f}", f"(H-h)*{logo.custom_y_pct / 100:.4f}"
+    return f"W-w-{margin}", str(margin)
+
+
+def _audio_graph(spec: RenderSpec, base_label: str, music_index: int | None, total_ms: int) -> list[str]:
+    audio = spec.audio
+    filters: list[str] = []
+    tail: list[str] = []
+    if audio.fade_in_ms:
+        tail.append(f"afade=t=in:st=0:d={_seconds(audio.fade_in_ms)}")
+    if audio.fade_out_ms:
+        start = max(0, total_ms - audio.fade_out_ms)
+        tail.append(f"afade=t=out:st={_seconds(start)}:d={_seconds(audio.fade_out_ms)}")
+    tail.append("anull")
+
+    if audio.mode == "replace" and music_index is not None:
+        filters.append(
+            f"[{music_index}:a]volume={audio.music_gain_db}dB,atrim=0:{_seconds(total_ms)},"
+            f"asetpts=PTS-STARTPTS[music]"
+        )
+        filters.append(f"[music]{','.join(tail)}[aout]")
+        return filters
+
+    if audio.mode == "original_plus_music" and music_index is not None:
+        filters.append(
+            f"[{music_index}:a]volume={audio.music_gain_db}dB,atrim=0:{_seconds(total_ms)},"
+            f"asetpts=PTS-STARTPTS[music]"
+        )
+        if audio.duck_music:
+            filters.append(f"{base_label}asplit=2[mainmix][sidechain]")
+            filters.append(
+                "[music][sidechain]sidechaincompress=threshold=0.05:ratio=4:attack=20:release=400"
+                "[ducked]"
+            )
+            filters.append("[mainmix][ducked]amix=inputs=2:duration=first:normalize=0[mixed]")
+        else:
+            filters.append(f"{base_label}[music]amix=inputs=2:duration=first:normalize=0[mixed]")
+        base_label = "[mixed]"
+
+    filters.append(f"{base_label}{','.join(tail)}[aout]")
+    return filters
+
+
+def _logo_filters(spec: RenderSpec, video_label: str, width: int, height: int, logo_index: int) -> list[str]:
+    logo = spec.logo
+    if not logo.enabled:
+        return [f"{video_label}null[vout]"]
+    logo_width = max(16, int(round(width * logo.width_pct / 100)))
+    x, y = _logo_position(spec, width, height)
+    enable = ""
+    if logo.from_ms is not None and logo.to_ms is not None:
+        enable = f":enable='between(t,{logo.from_ms / 1000:.3f},{logo.to_ms / 1000:.3f})'"
+    elif logo.from_ms is not None:
+        enable = f":enable='gte(t,{logo.from_ms / 1000:.3f})'"
+    elif logo.to_ms is not None:
+        enable = f":enable='lte(t,{logo.to_ms / 1000:.3f})'"
+    return [
+        f"[{logo_index}:v]scale={logo_width}:-1,format=rgba,"
+        f"colorchannelmixer=aa={logo.opacity:.3f}[logo]",
+        f"{video_label}[logo]overlay={x}:{y}{enable}[vout]",
+    ]
 
 
 def build_command(
@@ -86,39 +162,60 @@ def build_command(
     width, height = spec.video.dimensions
     fps = _fps(spec, source_fps)
     total_ms = spec.total_duration_ms
+    segment_count = len(spec.segments)
 
     args: list[str] = [
         ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     ]
 
-    for index, segment in enumerate(spec.segments):
+    audio_indexes: list[int] = []
+    next_input = 0
+    for segment in spec.segments:
         args += ["-ss", _seconds(segment.start_ms), "-t", _seconds(segment.duration_ms), "-i", str(source)]
+        audio_indexes.append(next_input)
+        next_input += 1
         if not has_audio:
             args += ["-f", "lavfi", "-t", _seconds(segment.duration_ms), "-i", SILENCE_LABEL]
+            audio_indexes[-1] = next_input
+            next_input += 1
+
+    music_index: int | None = None
+    if spec.audio.mode != "original" and spec.audio.music_name:
+        args += ["-i", spec.audio.music_name]
+        music_index = next_input
+        next_input += 1
+
+    logo_index: int | None = None
+    if spec.logo.enabled and spec.logo.asset_name:
+        args += ["-loop", "1", "-framerate", str(fps), "-t", _seconds(total_ms), "-i", spec.logo.asset_name]
+        logo_index = next_input
+        next_input += 1
 
     filters: list[str] = []
     video_inputs: list[str] = []
     audio_inputs: list[str] = []
 
-    for index in range(len(spec.segments)):
-        filters.append(_framing_chain(spec, width, height, f"[{index}:v]", f"v{index}", None))
+    for index in range(segment_count):
+        filters.append(_framing_chain(spec, width, height, f"[{index}:v]", f"v{index}"))
         video_inputs.append(f"[v{index}]")
-        if has_audio:
-            filters.append(_audio_chain(spec, f"[{index}:a]", f"a{index}"))
-            audio_inputs.append(f"[a{index}]")
-        else:
-            silence_index = len(spec.segments) + index
-            filters.append(_audio_chain(spec, f"[{silence_index}:a]", f"a{index}"))
-            audio_inputs.append(f"[a{index}]")
+        filters.append(_audio_chain(spec, f"[{audio_indexes[index]}:a]", f"a{index}"))
+        audio_inputs.append(f"[a{index}]")
 
-    if len(spec.segments) == 1:
-        filters.append(f"[v0]fps={fps}" + (f",ass={captions_name}" if captions_name else "") + "[vout]")
-        filters.append("[a0]anull[aout]")
+    if segment_count == 1:
+        filters.append(f"[v0]fps={fps}" + (f",ass={captions_name}" if captions_name else "") + "[vcapped]")
+        filters.append("[a0]anull[abase]")
     else:
-        concat_inputs = "".join(f"{video_inputs[i]}{audio_inputs[i]}" for i in range(len(spec.segments)))
-        filters.append(f"{concat_inputs}concat=n={len(spec.segments)}:v=1:a=1[vc][ac]")
-        filters.append(f"[vc]fps={fps}" + (f",ass={captions_name}" if captions_name else "") + "[vout]")
-        filters.append("[ac]anull[aout]")
+        concat_inputs = "".join(f"{video_inputs[i]}{audio_inputs[i]}" for i in range(segment_count))
+        filters.append(f"{concat_inputs}concat=n={segment_count}:v=1:a=1[vc][ac]")
+        filters.append(f"[vc]fps={fps}" + (f",ass={captions_name}" if captions_name else "") + "[vcapped]")
+        filters.append("[ac]anull[abase]")
+
+    filters.extend(_audio_graph(spec, "[abase]", music_index, total_ms))
+    filters.extend(
+        _logo_filters(spec, "[vcapped]", width, height, logo_index)
+        if logo_index is not None
+        else ["[vcapped]null[vout]"]
+    )
 
     args += [
         "-filter_complex", ";".join(filters),

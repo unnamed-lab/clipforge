@@ -22,6 +22,7 @@ def handle_analysis(ctx: JobContext) -> dict:
     return run_analysis(
         ctx.repos,
         ctx.settings,
+        ctx.storage,
         project_id=project_id,
         request=payload,
         on_stage=ctx.on_stage,
@@ -40,6 +41,7 @@ def handle_render(ctx: JobContext) -> dict:
         return perform_render(
             ctx.repos,
             ctx.settings,
+            ctx.storage,
             render_id=render_id,
             on_stage=ctx.on_stage,
             cancel_event=ctx.cancel_event,
@@ -71,6 +73,7 @@ def handle_url_import(ctx: JobContext) -> dict:
     record = download_remote(
         ctx.repos,
         ctx.settings,
+        ctx.storage,
         project_id=project_id,
         validated=validated,
         on_progress=lambda percent, message: ctx.on_stage("downloading", 5 + percent * 0.9, message),

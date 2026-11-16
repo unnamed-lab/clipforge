@@ -86,6 +86,12 @@ def _assert_host_allowed(host: str) -> None:
     lowered = host.lower().rstrip(".")
     if not lowered:
         raise ValidationFailed("The URL has no host", code="url_invalid")
+    try:
+        literal = ipaddress.ip_address(lowered)
+    except ValueError:
+        literal = None
+    if literal is not None and is_private_address(str(literal)):
+        raise ValidationFailed("Private and local network addresses are blocked", code="url_blocked")
     if lowered == "localhost" or lowered.endswith(FORBIDDEN_HOST_SUFFIXES):
         raise ValidationFailed("That host is not reachable from this app", code="url_blocked")
     if lowered in {"metadata.google.internal", "metadata", "instance-data"}:

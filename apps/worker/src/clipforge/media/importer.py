@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import uuid
 from pathlib import Path
@@ -14,6 +15,7 @@ from clipforge.errors import JobFailed, Unsupported, ValidationFailed
 from clipforge.media.probe import MediaInfo, probe
 from clipforge.security.paths import display_name
 from clipforge.security.urls import ValidatedUrl
+from clipforge.storage.base import StorageBackend
 from clipforge.storage.workspace import ensure_layout, ensure_space
 
 logger = logging.getLogger(__name__)
@@ -46,21 +48,28 @@ def _validate_duration(settings: Settings, info: MediaInfo) -> None:
         )
 
 
-def _replace_existing_source_file(repos: Repositories, project_id: str, keep: Path) -> None:
-    existing = repos.sources.find_optional(project_id)
+def _remove_replaced_source(storage: StorageBackend, existing: dict | None, keep_key: str) -> None:
     if not existing:
         return
-    old = Path(existing["storage_path"])
-    if old.exists() and old.resolve() != keep.resolve():
+    old_key = existing.get("relative_path")
+    if old_key and old_key != keep_key:
         try:
-            old.unlink()
-        except OSError:
-            logger.warning("Could not remove replaced source file")
+            storage.delete(old_key)
+        except Exception:
+            logger.warning("Could not remove the replaced source file from storage")
+    elif not old_key:
+        old = Path(existing.get("storage_path") or "")
+        if old.exists() and old != storage.path_for(keep_key):
+            try:
+                old.unlink()
+            except OSError:
+                logger.warning("Could not remove replaced source file")
 
 
 def persist_source(
     repos: Repositories,
     settings: Settings,
+    storage: StorageBackend,
     *,
     project_id: str,
     temporary_file: Path,
@@ -71,32 +80,38 @@ def persist_source(
     info = probe(temporary_file)
     _validate_duration(settings, info)
 
-    paths = ensure_layout(settings, project_id)
-    final_path = paths / "source" / f"{uuid.uuid4().hex}.{_extension_for(info)}"
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_file.replace(final_path)
+    ensure_layout(settings, project_id)
+    existing = repos.sources.find_optional(project_id)
+    key = f"projects/{project_id}/source/{uuid.uuid4().hex}.{_extension_for(info)}"
+    storage.put_file(key, temporary_file, content_type=mimetypes.guess_type(key)[0] or "video/mp4")
+    final_path = storage.path_for(key)
 
-    relative = final_path.relative_to(settings.data_dir.resolve()).as_posix()
-    _replace_existing_source_file(repos, project_id, final_path)
-
-    record = repos.sources.upsert(
-        project_id=project_id,
-        kind=kind,
-        original_name=display_name(original_name, fallback="source video"),
-        storage_path=str(final_path),
-        relative_path=relative,
-        size_bytes=info.size_bytes,
-        duration_ms=info.duration_ms,
-        width=info.width,
-        height=info.height,
-        fps=info.fps,
-        has_audio=info.has_audio,
-        video_codec=info.video_codec,
-        audio_codec=info.audio_codec,
-        container=info.container,
-        source_url=source_url,
-        probe=info.raw,
-    )
+    try:
+        record = repos.sources.upsert(
+            project_id=project_id,
+            kind=kind,
+            original_name=display_name(original_name, fallback="source video"),
+            storage_path=str(final_path),
+            relative_path=key,
+            size_bytes=info.size_bytes,
+            duration_ms=info.duration_ms,
+            width=info.width,
+            height=info.height,
+            fps=info.fps,
+            has_audio=info.has_audio,
+            video_codec=info.video_codec,
+            audio_codec=info.audio_codec,
+            container=info.container,
+            source_url=source_url,
+            probe=info.raw,
+        )
+    except Exception:
+        try:
+            storage.delete(key)
+        except Exception:
+            logger.warning("Could not remove the source file after a database failure")
+        raise
+    _remove_replaced_source(storage, existing, key)
     repos.projects.update(project_id, status="imported")
     return record
 
@@ -104,13 +119,16 @@ def persist_source(
 async def ingest_upload(
     repos: Repositories,
     settings: Settings,
+    storage: StorageBackend,
     *,
     project_id: str,
     upload: UploadStream,
 ) -> dict:
     project = repos.projects.get(project_id)
     paths = ensure_layout(settings, project_id)
-    ensure_space(settings, paths, required_bytes=settings.min_free_bytes)
+    declared = getattr(upload, "size", None) or 0
+    # Source plus PCM audio, waveform and a render can be several times the source.
+    ensure_space(settings, paths, required_bytes=max(64 * 1024 * 1024, declared * 3))
 
     part = paths / "source" / f"{uuid.uuid4().hex}.part"
     written = 0
@@ -132,6 +150,7 @@ async def ingest_upload(
         return persist_source(
             repos,
             settings,
+            storage,
             project_id=project_id,
             temporary_file=part,
             kind="upload",
@@ -156,6 +175,7 @@ def _yt_dlp_module():
 def download_remote(
     repos: Repositories,
     settings: Settings,
+    storage: StorageBackend,
     *,
     project_id: str,
     validated: ValidatedUrl,
@@ -164,7 +184,8 @@ def download_remote(
 ) -> dict:
     yt_dlp = _yt_dlp_module()
     paths = ensure_layout(settings, project_id)
-    ensure_space(settings, paths, required_bytes=settings.min_free_bytes)
+    # Remote size is unknown until metadata is read; reserve a sane working budget.
+    ensure_space(settings, paths, required_bytes=512 * 1024 * 1024)
     target_stem = paths / "source" / uuid.uuid4().hex
 
     base_options = {
@@ -261,6 +282,7 @@ def download_remote(
     record = persist_source(
         repos,
         settings,
+        storage,
         project_id=project_id,
         temporary_file=filepath,
         kind="url",

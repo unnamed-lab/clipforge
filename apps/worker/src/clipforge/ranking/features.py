@@ -18,7 +18,6 @@ from clipforge.ranking.lexicon import (
     EMOTION_WORDS,
     FILLER_STARTS,
     INTENSIFIERS,
-    QUESTION_WORDS,
     QUOTE_SHAPES,
     SECOND_PERSON,
     STOPWORDS,
@@ -165,7 +164,6 @@ def score_novelty(model: TranscriptModel, text: str) -> tuple[Component, list[st
 
 def score_density(draft: CandidateDraft, text: str) -> tuple[Component, list[str]]:
     tokens = tokenize(text)
-    duration_s = max(0.5, draft.duration_ms / 1000)
     speech_s = max(0.5, draft.speech_ms / 1000)
     content = [t for t in tokens if t not in STOPWORDS]
     per_speech_second = len(content) / speech_s
@@ -208,7 +206,6 @@ def score_quotability(sentences: list[Sentence]) -> tuple[Component, list[str]]:
     reason = "No obviously quotable line"
     for sentence in sentences:
         words = tokenize(sentence.text)
-        lowered = sentence.text.lower()
         if 4 <= len(words) <= 12 and not sentence.text.rstrip().endswith("?"):
             score += 0.4
             reason = "Contains a short, self-contained line that survives as a quote"

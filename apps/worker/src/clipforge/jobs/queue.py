@@ -18,6 +18,7 @@ from clipforge.config import Settings
 from clipforge.db.repositories import Repositories
 from clipforge.errors import AppError, JobFailed
 from clipforge.media.process import ProcessCancelled
+from clipforge.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +34,19 @@ class JobContext:
     cancel_event: threading.Event
     should_cancel: Callable[[], bool]
     on_stage: Callable[[str, float, str], None]
+    storage: StorageBackend
 
 
 Handler = Callable[[JobContext], dict | None]
 
 
 class JobQueue:
-    def __init__(self, repos: Repositories, settings: Settings, handlers: dict[str, Handler]) -> None:
+    def __init__(self, repos: Repositories, settings: Settings, handlers: dict[str, Handler],
+                 storage: StorageBackend) -> None:
         self.repos = repos
         self.settings = settings
         self.handlers = handlers
+        self.storage = storage
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -134,6 +138,7 @@ class JobQueue:
             cancel_event=cancel_event,
             should_cancel=lambda: cancel_event.is_set() or self.repos.jobs.is_cancel_requested(job_id),
             on_stage=on_stage,
+            storage=self.storage,
         )
 
         handler = self.handlers.get(job["type"])

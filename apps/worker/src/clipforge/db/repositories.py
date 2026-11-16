@@ -1,29 +1,15 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-import uuid
 from typing import Any, Iterable
 
 from clipforge.db.connection import Database, utc_now
+from clipforge.db.util import loads as _loads
+from clipforge.db.util import new_id, row_dict as _row
 from clipforge.errors import Conflict, NotFound
 
+_UNSET: Any = object()
 
-def new_id() -> str:
-    return uuid.uuid4().hex
-
-
-def _loads(value: str | None, fallback: Any) -> Any:
-    if not value:
-        return fallback
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return fallback
-
-
-def _row(row: sqlite3.Row | None) -> dict | None:
-    return dict(row) if row is not None else None
 
 
 # --------------------------------------------------------------------------- projects
@@ -33,14 +19,17 @@ class ProjectRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def create(self, *, name: str, goals: dict | None = None, settings: dict | None = None) -> dict:
+    def create(self, *, name: str, goals: dict | None = None, settings: dict | None = None,
+               profile_id: str | None = None, brief: dict | None = None,
+               library_source_id: str | None = None) -> dict:
         project_id = new_id()
         now = utc_now()
         with self.db.session() as conn:
             conn.execute(
-                "INSERT INTO projects(id, name, status, goals, settings, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (project_id, name, "draft", json.dumps(goals or {}), json.dumps(settings or {}), now, now),
+                "INSERT INTO projects(id, name, status, goals, settings, profile_id, brief_json,"
+                " library_source_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (project_id, name, "draft", json.dumps(goals or {}), json.dumps(settings or {}),
+                 profile_id, json.dumps(brief or {}), library_source_id, now, now),
             )
         return self.get(project_id)
 
@@ -52,6 +41,8 @@ class ProjectRepository:
         project = dict(row)
         project["goals"] = _loads(project.pop("goals"), {})
         project["settings"] = _loads(project.pop("settings"), {})
+        project["brief"] = _loads(project.pop("brief_json", None), {})
+        project["overrides"] = _loads(project.pop("overrides_json", None), {})
         return project
 
     def list(self) -> list[dict]:
@@ -72,6 +63,8 @@ class ProjectRepository:
             item = dict(row)
             item["goals"] = _loads(item.pop("goals"), {})
             item["settings"] = _loads(item.pop("settings"), {})
+            item["brief"] = _loads(item.pop("brief_json", None), {})
+            item["overrides"] = _loads(item.pop("overrides_json", None), {})
             item["has_audio"] = bool(item["has_audio"]) if item["has_audio"] is not None else None
             items.append(item)
         return items
@@ -105,6 +98,28 @@ class ProjectRepository:
         with self.db.session() as conn:
             conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (utc_now(), project_id))
 
+    def set_extension(self, project_id: str, *, profile_id: str | None | object = _UNSET,
+                      overrides: dict | None = None, brief: dict | None = None) -> dict:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if profile_id is not _UNSET:
+            assignments.append("profile_id = ?")
+            values.append(profile_id)
+        if overrides is not None:
+            assignments.append("overrides_json = ?")
+            values.append(json.dumps(overrides))
+        if brief is not None:
+            assignments.append("brief_json = ?")
+            values.append(json.dumps(brief))
+        if not assignments:
+            return self.get(project_id)
+        assignments.append("updated_at = ?")
+        values.append(utc_now())
+        values.append(project_id)
+        with self.db.session() as conn:
+            conn.execute(f"UPDATE projects SET {', '.join(assignments)} WHERE id = ?", values)
+        return self.get(project_id)
+
     def delete(self, project_id: str) -> None:
         with self.db.session() as conn:
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
@@ -112,6 +127,13 @@ class ProjectRepository:
     def exists(self, project_id: str) -> bool:
         with self.db.session() as conn:
             return conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is not None
+
+    def find_by_library_source(self, source_id: str) -> list[dict]:
+        with self.db.session() as conn:
+            rows = conn.execute(
+                "SELECT * FROM projects WHERE library_source_id = ? ORDER BY created_at DESC", (source_id,)
+            ).fetchall()
+        return [self.get(row["id"]) for row in rows]
 
 
 # --------------------------------------------------------------------------- sources
@@ -273,6 +295,11 @@ def serialise_candidate(row: dict) -> dict:
     data = dict(row)
     data["scores"] = _loads(data.pop("scores_json"), {})
     data["warnings"] = _loads(data.pop("warnings_json"), [])
+    detail = _loads(data.pop("hook_json", None), {}) or {}
+    data["hook_detail"] = detail
+    data["hook"] = detail.get("text") or data.get("hook") or ""
+    data["brief"] = _loads(data.pop("brief_json", None), {})
+    data["summary"] = data.get("summary") or ""
     data["start_ms"] = data.get("user_start_ms") if data.get("user_start_ms") is not None else data["start_ms"]
     data["end_ms"] = data.get("user_end_ms") if data.get("user_end_ms") is not None else data["end_ms"]
     data["duration_ms"] = int(data["end_ms"]) - int(data["start_ms"])
@@ -299,6 +326,8 @@ class CandidateRepository:
                     json.dumps(candidate.get("scores", {})), float(candidate.get("overall", 0)),
                     json.dumps(candidate.get("warnings", [])), candidate.get("method", "baseline"),
                     candidate.get("method_version", "1"), candidate.get("duplicate_of"), now, now,
+                    json.dumps(candidate.get("hook_detail") or {}), json.dumps(candidate.get("brief") or {}),
+                    candidate.get("summary", "")[:600],
                 )
             )
         with self.db.session() as conn:
@@ -307,8 +336,8 @@ class CandidateRepository:
                 """
                 INSERT INTO candidates(id, project_id, analysis_run_id, rank, start_ms, end_ms, title, hook,
                     reason, category, excerpt, scores_json, overall, warnings_json, method, method_version,
-                    duplicate_of, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    duplicate_of, created_at, updated_at, hook_json, brief_json, summary)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 rows,
             )
@@ -340,7 +369,8 @@ class CandidateRepository:
         return serialise_candidate(dict(row))
 
     def update(self, project_id: str, candidate_id: str, *, start_ms: int | None, end_ms: int | None,
-               decision: str | None, title: str | None) -> dict:
+               decision: str | None, title: str | None, summary: str | None = None,
+               hook: dict | None = None) -> dict:
         self.get(project_id, candidate_id)
         assignments: list[str] = []
         values: list[Any] = []
@@ -356,6 +386,14 @@ class CandidateRepository:
         if title is not None:
             assignments.append("title = ?")
             values.append(title[:200])
+        if summary is not None:
+            assignments.append("summary = ?")
+            values.append(summary[:600])
+        if hook is not None:
+            assignments.append("hook = ?")
+            values.append(str(hook.get("text") or "")[:300])
+            assignments.append("hook_json = ?")
+            values.append(json.dumps(hook))
         if not assignments:
             return self.get(project_id, candidate_id)
         assignments.append("updated_at = ?")
@@ -364,6 +402,16 @@ class CandidateRepository:
         with self.db.session() as conn:
             conn.execute(
                 f"UPDATE candidates SET {', '.join(assignments)} WHERE project_id = ? AND id = ?", values
+            )
+        return self.get(project_id, candidate_id)
+
+    def clear_hook(self, project_id: str, candidate_id: str) -> dict:
+        self.get(project_id, candidate_id)
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE candidates SET hook = '', hook_json = '{}', updated_at = ?"
+                " WHERE project_id = ? AND id = ?",
+                (utc_now(), project_id, candidate_id),
             )
         return self.get(project_id, candidate_id)
 
@@ -523,6 +571,7 @@ class JobRepository:
 def serialise_render(row: dict) -> dict:
     data = dict(row)
     data["spec"] = _loads(data.pop("spec_json"), {})
+    data["profile_snapshot"] = _loads(data.pop("profile_snapshot_json", None), {})
     data.pop("relative_path", None)
     data["download_url"] = f"/api/renders/{data['id']}/download" if data.get("status") == "completed" else None
     return data
@@ -533,13 +582,15 @@ class RenderRepository:
         self.db = db
 
     def create(self, *, project_id: str, job_id: str | None, candidate_id: str | None, spec: dict,
-               status: str = "queued") -> dict:
+               status: str = "queued", kind: str = "export", profile_snapshot: dict | None = None,
+               edit_spec_id: str | None = None) -> dict:
         render_id = new_id()
         with self.db.session() as conn:
             conn.execute(
-                "INSERT INTO renders(id, project_id, job_id, candidate_id, spec_json, status, created_at)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (render_id, project_id, job_id, candidate_id, json.dumps(spec), status, utc_now()),
+                "INSERT INTO renders(id, project_id, job_id, candidate_id, spec_json, status, kind,"
+                " profile_snapshot_json, edit_spec_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (render_id, project_id, job_id, candidate_id, json.dumps(spec), status, kind,
+                 json.dumps(profile_snapshot or {}), edit_spec_id, utc_now()),
             )
         return self.get(render_id)
 
@@ -564,13 +615,20 @@ class RenderRepository:
             ).fetchall()
         return [serialise_render(dict(r)) for r in rows]
 
+    def list_raw_for_project(self, project_id: str) -> list[dict]:
+        with self.db.session() as conn:
+            rows = conn.execute(
+                "SELECT * FROM renders WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def mark_completed(self, render_id: str, *, relative_path: str, size_bytes: int, duration_ms: int,
-                       width: int, height: int) -> None:
+                       width: int, height: int, subtitle_path: str | None = None) -> None:
         with self.db.session() as conn:
             conn.execute(
                 "UPDATE renders SET status = 'completed', relative_path = ?, size_bytes = ?, duration_ms = ?,"
-                " width = ?, height = ?, finished_at = ? WHERE id = ?",
-                (relative_path, size_bytes, duration_ms, width, height, utc_now(), render_id),
+                " width = ?, height = ?, subtitle_path = ?, finished_at = ? WHERE id = ?",
+                (relative_path, size_bytes, duration_ms, width, height, subtitle_path, utc_now(), render_id),
             )
 
     def mark_failed(self, render_id: str, code: str, message: str) -> None:
@@ -600,6 +658,20 @@ class Repositories:
     """Container so handlers can be injected with one object."""
 
     def __init__(self, db: Database) -> None:
+        from clipforge.db.extensions import (
+            BrandAssetRepository,
+            BriefRepository,
+            CaptionPresetRepository,
+            CorrectionRepository,
+            DatasetRepository,
+            EditSpecRepository,
+            EvaluationRepository,
+            LibraryImportRepository,
+            LibrarySourceRepository,
+            ProfileRepository,
+            RightsRepository,
+        )
+
         self.db = db
         self.projects = ProjectRepository(db)
         self.sources = SourceRepository(db)
@@ -608,3 +680,14 @@ class Repositories:
         self.candidates = CandidateRepository(db)
         self.jobs = JobRepository(db)
         self.renders = RenderRepository(db)
+        self.profiles = ProfileRepository(db)
+        self.assets = BrandAssetRepository(db)
+        self.briefs = BriefRepository(db)
+        self.caption_presets = CaptionPresetRepository(db)
+        self.corrections = CorrectionRepository(db)
+        self.edit_specs = EditSpecRepository(db)
+        self.library = LibrarySourceRepository(db)
+        self.rights = RightsRepository(db)
+        self.library_imports = LibraryImportRepository(db)
+        self.evaluations = EvaluationRepository(db)
+        self.datasets = DatasetRepository(db)

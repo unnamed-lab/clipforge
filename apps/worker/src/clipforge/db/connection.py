@@ -6,7 +6,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+
+# Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
+# so startup applies each one only when it is missing.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "projects": {
+        "profile_id": "TEXT",
+        "overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+        "brief_json": "TEXT NOT NULL DEFAULT '{}'",
+        "library_source_id": "TEXT",
+    },
+    "analysis_runs": {
+        "brief_json": "TEXT NOT NULL DEFAULT '{}'",
+    },
+    "candidates": {
+        "hook_json": "TEXT NOT NULL DEFAULT '{}'",
+        "brief_json": "TEXT NOT NULL DEFAULT '{}'",
+        "summary": "TEXT NOT NULL DEFAULT ''",
+    },
+    "renders": {
+        "kind": "TEXT NOT NULL DEFAULT 'export'",
+        "profile_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+        "edit_spec_id": "TEXT",
+        "subtitle_path": "TEXT",
+    },
+}
+
 
 
 def utc_now() -> str:
@@ -43,8 +69,19 @@ class Database:
         schema = (Path(__file__).with_name("schema.sql")).read_text(encoding="utf-8")
         with self.session() as conn:
             conn.executescript(schema)
+            self._apply_column_migrations(conn)
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (SCHEMA_VERSION,),
             )
+
+    @staticmethod
+    def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if not existing:
+                continue
+            for column, definition in columns.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

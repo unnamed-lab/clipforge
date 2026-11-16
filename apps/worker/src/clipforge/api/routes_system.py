@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import subprocess
 import time
 from functools import lru_cache
@@ -88,6 +87,7 @@ def capabilities(request: Request) -> dict:
             "requires_consent": True,
         },
         "storage": {
+            **state.storage.describe(),
             "free_bytes": free_bytes(settings.data_dir),
             "min_free_bytes": settings.min_free_bytes,
             "data_dir": "data",

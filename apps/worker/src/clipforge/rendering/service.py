@@ -1,9 +1,10 @@
-"""Render orchestration: spec -> captions -> ffmpeg -> validated artefact."""
+"""Render orchestration: policy -> assets -> spec -> captions -> ffmpeg -> artefact."""
 
 from __future__ import annotations
 
 import json
 import logging
+import shutil
 import threading
 from pathlib import Path
 from typing import Callable
@@ -15,13 +16,17 @@ from clipforge.media.process import ProcessCancelled
 from clipforge.media.probe import probe
 from clipforge.rendering.ffmpeg import build_command, execute
 from clipforge.rendering.spec import RenderSpec
-from clipforge.rendering.subtitles import build_ass
+from clipforge.rendering.subtitles import build_ass, build_srt
+from clipforge.storage.base import StorageBackend, StorageObjectMissing, ensure_local
 from clipforge.storage.workspace import clear_tmp, ensure_layout, ensure_space
 
 logger = logging.getLogger(__name__)
 
 CAPTIONS_FILENAME = "captions.ass"
+SIDECAR_FILENAME = "captions.srt"
 OUTPUT_FILENAME = "out.mp4"
+LOGO_FILENAME = "logo.png"
+MUSIC_FILENAME = "music"
 DURATION_TOLERANCE_MS = 2_500
 
 StageCallback = Callable[[str, float, str], None]
@@ -42,9 +47,95 @@ def _words_for_spans(segments: list[dict], spans: list[tuple[int, int]]) -> list
     return result
 
 
+def _snapshot_document(spec: RenderSpec) -> dict:
+    snapshot = spec.profile_snapshot or {}
+    document = snapshot.get("document") if isinstance(snapshot, dict) else None
+    return document if isinstance(document, dict) else {}
+
+
+def _policy_checks(spec: RenderSpec) -> None:
+    document = _snapshot_document(spec)
+    branding = document.get("branding") or {}
+    captions = document.get("captions") or {}
+    audio = document.get("audio") or {}
+
+    if branding.get("logo_required") and not spec.logo.enabled:
+        raise JobFailed(
+            "logo_required",
+            "This client profile requires a logo. Upload one or explicitly override the requirement.",
+        )
+    if captions.get("required") and not spec.captions.enabled:
+        raise JobFailed(
+            "captions_required",
+            "This client profile requires captions. Turn them on or override the requirement.",
+        )
+    if spec.audio.mode == "replace" and not audio.get("allow_replacement"):
+        raise JobFailed(
+            "audio_replacement_not_permitted",
+            "This profile does not permit replacing the original audio.",
+        )
+
+
+def _asset_path(storage: StorageBackend, asset: dict) -> Path | None:
+    try:
+        return ensure_local(
+            storage,
+            asset.get("relative_path"),
+            legacy_path=asset.get("storage_path"),
+            missing_message="The configured asset is missing from storage.",
+        )
+    except StorageObjectMissing:
+        return None
+
+
+def _prepare_assets(spec: RenderSpec, repos: Repositories, storage: StorageBackend, work: Path) -> list[str]:
+    warnings: list[str] = []
+
+    if spec.logo.enabled and spec.logo.asset_id:
+        asset = repos.assets.get(spec.logo.asset_id)
+        if not asset.get("renderable"):
+            if spec.logo.required:
+                raise JobFailed(
+                    "logo_not_renderable",
+                    "The configured logo is an SVG, which FFmpeg cannot overlay. Export a transparent PNG.",
+                )
+            spec.logo.enabled = False
+            warnings.append("The configured logo is an SVG and was skipped; upload a transparent PNG to render it.")
+        else:
+            source = _asset_path(storage, asset)
+            if source is None:
+                if spec.logo.required:
+                    raise JobFailed("logo_missing", "The configured logo file is missing from storage.")
+                spec.logo.enabled = False
+                warnings.append("The configured logo file is missing and was skipped.")
+            else:
+                shutil.copyfile(source, work / LOGO_FILENAME)
+                spec.logo.asset_name = LOGO_FILENAME
+
+    if spec.audio.mode != "original":
+        if not spec.audio.music_asset_id:
+            raise JobFailed("music_missing", "This audio mode needs an approved music file.")
+        asset = repos.assets.get(spec.audio.music_asset_id)
+        if not asset.get("licence_confirmed"):
+            raise JobFailed(
+                "music_unlicensed",
+                "The selected music has not been confirmed as licensed for this use. "
+                "Confirm its licence before exporting.",
+            )
+        source = _asset_path(storage, asset)
+        if source is None:
+            raise JobFailed("music_missing", "The approved music file is missing from storage.")
+        suffix = "." + asset["original_name"].rsplit(".", 1)[-1].lower()
+        shutil.copyfile(source, work / f"{MUSIC_FILENAME}{suffix}")
+        spec.audio.music_name = f"{MUSIC_FILENAME}{suffix}"
+
+    return warnings
+
+
 def perform_render(
     repos: Repositories,
     settings: Settings,
+    storage: StorageBackend,
     *,
     render_id: str,
     on_stage: StageCallback,
@@ -60,20 +151,29 @@ def perform_render(
         spec.validate_against(int(source["duration_ms"]))
     except ValueError as exc:
         raise JobFailed("invalid_render_spec", str(exc)) from exc
+    _policy_checks(spec)
 
     paths = ensure_layout(settings, project_id)
     clear_tmp(settings, project_id)
     work = paths / "tmp" / render_id
     work.mkdir(parents=True, exist_ok=True)
-    source_path = Path(source["storage_path"])
-    if not source_path.exists():
-        raise JobFailed("source_missing", "The original video file is missing from this project.")
+    try:
+        source_path = ensure_local(
+            storage,
+            source.get("relative_path"),
+            legacy_path=source.get("storage_path"),
+            missing_message="The original video file is missing from this project.",
+        )
+    except StorageObjectMissing as exc:
+        raise JobFailed("source_missing", exc.message) from exc
 
     ensure_space(settings, paths, required_bytes=400 * 1024 * 1024)
+    on_stage("assets", 2, "Checking brand assets and audio policy")
+    warnings = _prepare_assets(spec, repos, storage, work)
 
     spans = [(segment.start_ms, segment.end_ms) for segment in spec.segments]
     captions_name: str | None = None
-    warnings: list[str] = []
+    sidecar_text: str | None = None
 
     if spec.captions.enabled:
         transcript = repos.transcripts.latest(project_id)
@@ -83,9 +183,12 @@ def perform_render(
             words = _words_for_spans(transcript["segments"], spans)
             if any(words):
                 width, height = spec.video.dimensions
-                ass = build_ass(spans, words, spec, width, height)
-                (work / CAPTIONS_FILENAME).write_text(ass, encoding="utf-8")
-                captions_name = CAPTIONS_FILENAME
+                if spec.captions.export_sidecar:
+                    sidecar_text = build_srt(spans, words)
+                if spec.captions.burn_in:
+                    ass = build_ass(spans, words, spec, width, height)
+                    (work / CAPTIONS_FILENAME).write_text(ass, encoding="utf-8")
+                    captions_name = CAPTIONS_FILENAME
             else:
                 warnings.append("Captions were requested but this span has no word timings.")
 
@@ -111,7 +214,8 @@ def perform_render(
         logger.error("Render failed: %s", exc)
         raise JobFailed(
             "render_failed",
-            "The video encoder failed. This is usually a source format issue; try a different clip or preset.",
+            "The video encoder failed. This is usually a source format or asset issue; "
+            "check the logo and music files, then try again.",
         ) from exc
 
     on_stage("validating", 95, "Checking the output file")
@@ -133,20 +237,35 @@ def perform_render(
     if not info.has_audio:
         raise JobFailed("render_no_audio", "The rendered file has no audio track.")
 
-    final_dir = paths / "renders"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    final_path = final_dir / f"{render_id}.mp4"
-    output.replace(final_path)
-
-    relative = final_path.relative_to(settings.data_dir.resolve()).as_posix()
-    repos.renders.mark_completed(
-        render_id,
-        relative_path=relative,
-        size_bytes=final_path.stat().st_size,
-        duration_ms=info.duration_ms,
-        width=info.width or 0,
-        height=info.height or 0,
-    )
+    final_key = f"projects/{project_id}/renders/{render_id}.mp4"
+    subtitle_key = f"projects/{project_id}/renders/{render_id}.srt" if sidecar_text else None
+    size_bytes = output.stat().st_size
+    try:
+        storage.put_file(final_key, output, content_type="video/mp4")
+        if sidecar_text and subtitle_key:
+            storage.put_bytes(subtitle_key, sidecar_text.encode("utf-8"), content_type="application/x-subrip")
+        repos.renders.mark_completed(
+            render_id,
+            relative_path=final_key,
+            size_bytes=size_bytes,
+            duration_ms=info.duration_ms,
+            width=info.width or 0,
+            height=info.height or 0,
+            subtitle_path=subtitle_key,
+        )
+    except Exception:
+        # A partially written render is not advertised, and its objects must not
+        # become paid orphans. Missing objects are already deleted.
+        for key in (final_key, subtitle_key):
+            if not key:
+                continue
+            try:
+                storage.delete(key)
+            except Exception:
+                logger.warning("Could not remove the failed render object %s", key)
+        raise
+    if sidecar_text:
+        warnings.append("Subtitles were exported as a separate .srt file.")
     on_stage("done", 100, "Render complete")
 
     return {
@@ -154,7 +273,8 @@ def perform_render(
         "duration_ms": info.duration_ms,
         "width": info.width,
         "height": info.height,
-        "size_bytes": final_path.stat().st_size,
+        "size_bytes": size_bytes,
+        "subtitle_path": subtitle_key,
         "warnings": warnings,
         "encode_seconds": round(outcome.duration_seconds, 1),
     }

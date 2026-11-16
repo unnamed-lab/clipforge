@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import threading
 from pathlib import Path
@@ -14,6 +13,14 @@ from clipforge.db.repositories import Repositories, new_id
 from clipforge.errors import JobFailed
 from clipforge.media.audio import extract_audio
 from clipforge.media.waveform import render_waveform
+from clipforge.pipeline.briefing import (
+    apply_brief,
+    apply_corrections,
+    attach_hooks,
+    persist_brief,
+    resolve_brief,
+    summarise,
+)
 from clipforge.providers.llm.openai_compat import build_llm_provider
 from clipforge.providers.llm.base import ScorableClip
 from clipforge.providers.transcription.base import TranscriptionOptions
@@ -22,6 +29,7 @@ from clipforge.ranking.dedupe import select_candidates
 from clipforge.ranking.generate import DURATION_BANDS, generate_candidates
 from clipforge.ranking.score import score_candidates, weights_for
 from clipforge.ranking.sentences import build_transcript_model
+from clipforge.storage.base import StorageBackend, StorageObjectMissing, ensure_local
 from clipforge.storage.workspace import ensure_layout, ensure_space, write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -73,6 +81,7 @@ def _resolve_options(settings: Settings, request: dict) -> TranscriptionOptions:
 def run_analysis(
     repos: Repositories,
     settings: Settings,
+    storage: StorageBackend,
     *,
     project_id: str,
     request: dict,
@@ -88,9 +97,23 @@ def run_analysis(
             "This video has no audio track, so there is no speech to analyse.",
         )
 
-    source_path = Path(source["storage_path"])
-    if not source_path.exists():
-        raise JobFailed("source_missing", "The source video is missing from this project's workspace.")
+    try:
+        source_path = ensure_local(
+            storage,
+            source.get("relative_path"),
+            legacy_path=source.get("storage_path"),
+            missing_message="The source video is missing from this project's workspace.",
+        )
+    except StorageObjectMissing as exc:
+        raise JobFailed("source_missing", exc.message) from exc
+
+    brief, brief_source = resolve_brief(repos, project, request)
+    persist_brief(repos, project, brief, brief_source)
+    warnings: list[str] = []
+    if brief_source == "legacy":
+        warnings.append(
+            "This project has no saved clipping brief, so a brief was inferred from the legacy goal settings."
+        )
 
     options = _resolve_options(settings, request)
     on_stage("prepare", 1, "Reading source")
@@ -99,8 +122,7 @@ def run_analysis(
     paths.mkdir(parents=True, exist_ok=True)
 
     goal = str(request.get("goal") or "best_moments")
-    clip_count = int(request.get("clip_count") or 8)
-    clip_count = max(3, min(20, clip_count))
+    clip_count = brief.clip_count
     band_choice = str(request.get("duration_band") or "auto")
 
     provider = FasterWhisperTranscription()
@@ -111,7 +133,6 @@ def run_analysis(
     on_stage("prepare", 3, "Checking for an existing transcript")
     fingerprint = analysis_fingerprint(source_path, options)
     transcript = repos.transcripts.find_by_fingerprint(project_id, fingerprint)
-    warnings: list[str] = []
 
     if transcript is not None:
         on_stage("transcribe", 60, "Reusing the existing transcript")
@@ -164,6 +185,11 @@ def run_analysis(
     if should_cancel():
         raise JobFailed("cancelled", "Cancelled")
 
+    corrections = repos.corrections.list(project_id)
+    if corrections:
+        segments = apply_corrections(segments, corrections)
+        warnings.append(f"Applied {len(corrections)} manual transcript correction(s).")
+
     render_waveform(source_path, paths / "analysis" / "waveform.png", cancel=cancel_event)
 
     on_stage("candidates", 63, "Finding candidate moments")
@@ -171,9 +197,11 @@ def run_analysis(
     if not model.sentences:
         raise JobFailed("no_speech_detected", "The transcript has no usable sentences to build clips from.")
 
-    bands = DURATION_BANDS
+    bands = brief.duration_bands()
     if band_choice in {"short", "medium", "long"}:
-        bands = tuple(band for band in DURATION_BANDS if band[2] == band_choice)
+        explicit = tuple(band for band in DURATION_BANDS if band[2] == band_choice)
+        if explicit:
+            bands = explicit
     drafts = generate_candidates(model, bands=bands)
     if not drafts:
         raise JobFailed(
@@ -181,12 +209,20 @@ def run_analysis(
             "No clip candidates could be built from this transcript. The video may be too short or too sparse.",
         )
 
-    on_stage("rank", 72, "Scoring candidates")
+    on_stage("rank", 72, "Scoring candidates against the brief")
     ranked = score_candidates(drafts, model, goal=goal, weight_overrides=request.get("weights") or None)
+    ranked, blocked = apply_brief(ranked, brief)
+    if not ranked:
+        raise JobFailed(
+            "all_candidates_excluded",
+            "Every candidate was excluded by the brief's exclusions or safety rules. "
+            "Relax the brief or check the transcript.",
+        )
 
     run_id = new_id()
     run = repos.runs.create(project_id, {"goal": goal, "clip_count": clip_count, "quality": request.get("quality"),
-                                         "duration_band": band_choice, "model": options.model})
+                                         "duration_band": band_choice, "model": options.model,
+                                         "brief": brief.model_dump(), "brief_source": brief_source})
     run_id = run["id"]
 
     llm_provider = build_llm_provider(settings) if request.get("use_llm") else None
@@ -241,12 +277,29 @@ def run_analysis(
         raise JobFailed("cancelled", "Cancelled")
 
     on_stage("rank", 90, "Removing near-duplicates")
-    selection = select_candidates(ranked, limit=clip_count, duration_ms=duration_ms)
+    eligible = [candidate for candidate in ranked if candidate.overall >= brief.min_quality]
+    if not eligible:
+        eligible = ranked[: min(3, len(ranked))]
+        warnings.append(
+            f"No moment reached the brief's minimum quality of {brief.min_quality:.0f}/100. "
+            "The closest matches are shown; review them before exporting."
+        )
+    elif len(eligible) < len(ranked):
+        warnings.append(
+            f"{len(ranked) - len(eligible)} candidate(s) scored below the brief's minimum quality threshold."
+        )
+
+    selection = select_candidates(eligible, limit=clip_count, duration_ms=duration_ms)
     if not selection.kept:
         raise JobFailed("no_candidates", "No clip candidates survived the quality checks.")
 
+    if blocked:
+        warnings.append(f"{blocked} candidate(s) were excluded by the brief's exclusions or safety rules.")
+    warnings.extend(attach_hooks(selection.kept, model, brief))
+
     now_payload = []
     for candidate in selection.kept:
+        hook_detail = candidate.hook_detail or {}
         now_payload.append(
             {
                 "id": new_id(),
@@ -254,10 +307,13 @@ def run_analysis(
                 "end_ms": candidate.end_ms,
                 "title": candidate.title,
                 "hook": candidate.hook,
+                "hook_detail": hook_detail,
+                "summary": candidate.summary or summarise(candidate.excerpt),
                 "reason": candidate.reason,
                 "category": candidate.category,
                 "excerpt": candidate.excerpt,
                 "scores": candidate.scores_payload(),
+                "brief": candidate.brief,
                 "overall": candidate.overall,
                 "warnings": candidate.warnings,
                 "method": candidate.method,
@@ -271,8 +327,9 @@ def run_analysis(
     repos.projects.update(project_id, status="analysed")
     write_json_atomic(
         paths / "analysis" / "candidates.json",
-        {"run_id": run_id, "goal": goal, "weights": weights_for(goal), "candidates": now_payload,
-         "suppressed": len(selection.suppressed), "warnings": warnings},
+        {"run_id": run_id, "goal": goal, "brief": brief.model_dump(), "brief_source": brief_source,
+         "weights": weights_for(goal), "candidates": now_payload,
+         "suppressed": len(selection.suppressed), "excluded_by_brief": blocked, "warnings": warnings},
     )
 
     on_stage("done", 100, "Analysis complete")
@@ -280,6 +337,8 @@ def run_analysis(
         "analysis_run_id": run_id,
         "candidates": len(now_payload),
         "suppressed_duplicates": len(selection.suppressed),
+        "excluded_by_brief": blocked,
+        "brief_source": brief_source,
         "language": language,
         "language_probability": language_probability,
         "model": options.model,

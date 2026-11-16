@@ -35,6 +35,15 @@ def _env_path(name: str, default: Path) -> Path:
     return candidate
 
 
+def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name, "")
+    values = tuple(value.strip() for value in raw.split(",") if value.strip())
+    return values or default
+
+
+DEFAULT_CORS_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path
@@ -52,6 +61,16 @@ class Settings:
     llm_model: str
     llm_api_key: str
     llm_timeout_seconds: int
+    youtube_api_key: str = ""
+    twitch_client_id: str = ""
+    twitch_client_secret: str = ""
+    cors_origins: tuple[str, ...] = DEFAULT_CORS_ORIGINS
+    storage_backend: str = "local"
+    supabase_url: str = ""
+    supabase_service_key: str = ""
+    supabase_bucket: str = "clipforge"
+    supabase_storage_prefix: str = "/storage/v1"
+    supabase_timeout_seconds: int = 60
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -109,11 +128,13 @@ def load_settings() -> Settings:
     settings = Settings(
         data_dir=data_dir,
         host=os.environ.get("CLIPFORGE_WORKER_HOST", "127.0.0.1"),
-        port=_env_int("CLIPFORGE_WORKER_PORT", 8788),
+        # Render and most container platforms inject PORT. Prefer it over the
+        # local default so one image works on a host and on a managed platform.
+        port=_env_int("PORT", _env_int("CLIPFORGE_WORKER_PORT", 8788)),
         token=_load_or_create_token(data_dir),
         max_upload_bytes=_env_int("CLIPFORGE_MAX_UPLOAD_MB", 2048) * 1024 * 1024,
         max_duration_ms=_env_int("CLIPFORGE_MAX_DURATION_MINUTES", 360) * 60 * 1000,
-        min_free_bytes=_env_int("CLIPFORGE_MIN_FREE_GB", 2) * 1024 * 1024 * 1024,
+        min_free_bytes=_env_int("CLIPFORGE_DISK_RESERVE_MB", 512) * 1024 * 1024,
         whisper_model=os.environ.get("CLIPFORGE_WHISPER_MODEL", "small").strip() or "small",
         whisper_device=os.environ.get("CLIPFORGE_WHISPER_DEVICE", "cpu").strip() or "cpu",
         whisper_compute_type=os.environ.get("CLIPFORGE_WHISPER_COMPUTE_TYPE", "int8").strip() or "int8",
@@ -122,5 +143,15 @@ def load_settings() -> Settings:
         llm_model=os.environ.get("CLIPFORGE_LLM_MODEL", "").strip(),
         llm_api_key=os.environ.get("CLIPFORGE_LLM_API_KEY", "").strip(),
         llm_timeout_seconds=_env_int("CLIPFORGE_LLM_TIMEOUT_SECONDS", 60),
+        youtube_api_key=os.environ.get("CLIPFORGE_YOUTUBE_API_KEY", "").strip(),
+        twitch_client_id=os.environ.get("CLIPFORGE_TWITCH_CLIENT_ID", "").strip(),
+        twitch_client_secret=os.environ.get("CLIPFORGE_TWITCH_CLIENT_SECRET", "").strip(),
+        cors_origins=_env_list("CLIPFORGE_CORS_ORIGINS", DEFAULT_CORS_ORIGINS),
+        storage_backend=os.environ.get("CLIPFORGE_STORAGE_BACKEND", "local").strip() or "local",
+        supabase_url=os.environ.get("CLIPFORGE_SUPABASE_URL", "").strip(),
+        supabase_service_key=os.environ.get("CLIPFORGE_SUPABASE_SERVICE_KEY", "").strip(),
+        supabase_bucket=os.environ.get("CLIPFORGE_SUPABASE_BUCKET", "clipforge").strip() or "clipforge",
+        supabase_storage_prefix=os.environ.get("CLIPFORGE_SUPABASE_STORAGE_PREFIX", "/storage/v1"),
+        supabase_timeout_seconds=_env_int("CLIPFORGE_SUPABASE_TIMEOUT_SECONDS", 60),
     )
     return settings

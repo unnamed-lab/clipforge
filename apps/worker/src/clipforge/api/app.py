@@ -12,6 +12,9 @@ from fastapi.responses import JSONResponse
 from clipforge import __version__
 from clipforge.api import (
     routes_analysis,
+    routes_library,
+    routes_profiles,
+    routes_project_settings,
     routes_projects,
     routes_renders,
     routes_sources,
@@ -25,6 +28,7 @@ from clipforge.errors import AppError
 from clipforge.jobs.handlers import build_handlers
 from clipforge.jobs.queue import JobQueue
 from clipforge.logging_setup import configure_logging
+from clipforge.storage import build_storage
 
 logger = logging.getLogger(__name__)
 
@@ -39,19 +43,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     database = Database(settings.db_path)
     database.initialise()
     repos = Repositories(database)
-    queue = JobQueue(repos, settings, build_handlers(repos))
+    storage = build_storage(settings)
+    queue = JobQueue(repos, settings, build_handlers(repos), storage)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         queue.start()
         logger.info(
-            "Clipforge worker %s ready on %s:%s (data: %s)",
-            __version__, settings.host, settings.port, settings.data_dir,
+            "Clipforge worker %s ready on %s:%s (data: %s, storage: %s)",
+            __version__, settings.host, settings.port, settings.data_dir, storage.name,
         )
         try:
             yield
         finally:
-            queue.stop()
+            try:
+                queue.stop()
+            finally:
+                storage.close()
 
     app = FastAPI(
         title="Clipforge worker",
@@ -60,12 +68,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/api/openapi.json",
         lifespan=lifespan,
     )
-    app.state.clipforge = AppState(settings=settings, repos=repos, queue=queue)
+    app.state.clipforge = AppState(settings=settings, repos=repos, queue=queue, storage=storage)
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_origins=list(settings.cors_origins),
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["content-type", "x-clipforge-token"],
         max_age=600,
     )
@@ -115,8 +123,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     app.include_router(routes_system.router)
+    app.include_router(routes_profiles.router)
     app.include_router(routes_projects.router)
+    app.include_router(routes_project_settings.router)
     app.include_router(routes_sources.router)
     app.include_router(routes_analysis.router)
     app.include_router(routes_renders.router)
+    app.include_router(routes_library.router)
     return app

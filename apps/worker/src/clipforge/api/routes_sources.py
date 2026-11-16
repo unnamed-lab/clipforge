@@ -12,6 +12,7 @@ from clipforge.db.repositories import serialise_source
 from clipforge.errors import AppError, NotFound, ValidationFailed
 from clipforge.media.importer import ingest_upload
 from clipforge.security.urls import validate_url_shape
+from clipforge.storage.base import StorageObjectMissing, ensure_local
 from clipforge.storage.workspace import ensure_layout
 
 router = APIRouter(prefix="/api/projects", tags=["sources"])
@@ -22,7 +23,9 @@ RANGE_CHUNK = 512 * 1024
 @router.post("/{project_id}/sources/upload")
 async def upload_source(project_id: str, request: Request, file: UploadFile = File(...)) -> dict:
     state = get_state(request)
-    record = await ingest_upload(state.repos, state.settings, project_id=project_id, upload=file)
+    record = await ingest_upload(
+        state.repos, state.settings, state.storage, project_id=project_id, upload=file
+    )
     return {"source": serialise_source(record)}
 
 
@@ -69,9 +72,15 @@ def stream_media(project_id: str, request: Request) -> StreamingResponse:
     source = state.repos.sources.find_optional(project_id)
     if source is None:
         raise NotFound("This project has no source video")
-    path = Path(source["storage_path"])
-    if not path.exists():
-        raise NotFound("The source file is missing from this project")
+    try:
+        path = ensure_local(
+            state.storage,
+            source.get("relative_path"),
+            legacy_path=source.get("storage_path"),
+            missing_message="The source file is missing from this project",
+        )
+    except StorageObjectMissing as exc:
+        raise NotFound(exc.message) from exc
     return _ranged_response(request, path)
 
 

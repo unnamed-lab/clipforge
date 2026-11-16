@@ -2,6 +2,9 @@
 
 The same document is stored on a render, shown as a preview summary in the UI, and
 turned into FFmpeg arguments by ``ffmpeg.py``. There is exactly one renderer.
+
+Version 2 adds explicit hook segments, audio policy, logo overlays and a profile
+snapshot. Version 1 documents still load, so old render records remain readable.
 """
 
 from __future__ import annotations
@@ -81,20 +84,30 @@ CAPTION_PRESETS: dict[str, dict] = {
 
 class CaptionSettings(BaseModel):
     enabled: bool = True
+    burn_in: bool = True
+    export_sidecar: bool = False
     preset: Literal["clean", "large", "minimal", "branded", "custom"] = "clean"
     font_family: str = Field(default="Arial", max_length=60)
     font_size: int = Field(default=54, ge=18, le=140)
     bold: bool = True
+    weight: Literal["auto", "regular", "medium", "bold", "black"] = "auto"
     position: Literal["bottom", "center", "top"] = "bottom"
     margin_v: int = Field(default=150, ge=0, le=900)
     primary_color: str = "#FFFFFF"
     highlight_color: str = "#FFD166"
     outline_color: str = "#000000"
     outline_width: float = Field(default=2.0, ge=0, le=8)
+    shadow: float = Field(default=0.0, ge=0, le=8)
     uppercase: bool = False
     max_words_per_line: int = Field(default=5, ge=1, le=12)
     max_lines: int = Field(default=2, ge=1, le=3)
     background: bool = False
+    background_opacity: int = Field(default=65, ge=0, le=100)
+    alignment: Literal["left", "center", "right"] = "center"
+    highlight: Literal["word", "none"] = "word"
+    animation: Literal["none", "fade", "pop"] = "none"
+    max_chars_per_line: int = Field(default=0, ge=0, le=80)
+    reading_speed_cps: int = Field(default=0, ge=0, le=60)
 
     @field_validator("primary_color", "highlight_color", "outline_color")
     @classmethod
@@ -109,6 +122,14 @@ class CaptionSettings(BaseModel):
         cleaned = re.sub(r"[^A-Za-z0-9 _-]", "", value or "").strip()
         return cleaned or "Arial"
 
+    @model_validator(mode="after")
+    def _weight(self) -> "CaptionSettings":
+        if self.weight != "auto":
+            self.bold = self.weight in {"bold", "black"}
+        if self.enabled and not self.burn_in and not self.export_sidecar:
+            raise ValueError("Captions are enabled but neither burned in nor exported as a sidecar")
+        return self
+
 
 class VideoSettings(BaseModel):
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
@@ -122,12 +143,51 @@ class VideoSettings(BaseModel):
 
 
 class AudioSettings(BaseModel):
+    mode: Literal["original", "original_plus_music", "replace"] = "original"
     normalize: bool = False
+    denoise: bool = False
+    dialogue_enhance: bool = False
+    fade_in_ms: int = Field(default=0, ge=0, le=5_000)
+    fade_out_ms: int = Field(default=0, ge=0, le=5_000)
+    music_asset_id: str | None = None
+    music_name: str | None = None
+    music_gain_db: float = Field(default=-18.0, ge=-40, le=0)
+    duck_music: bool = True
+
+    @model_validator(mode="after")
+    def _music(self) -> "AudioSettings":
+        if self.mode != "original" and not self.music_asset_id:
+            raise ValueError("This audio mode needs an approved music asset")
+        return self
+
+
+class LogoOverlay(BaseModel):
+    enabled: bool = False
+    required: bool = False
+    asset_id: str | None = None
+    asset_name: str | None = None
+    position: Literal["top-left", "top-right", "bottom-left", "bottom-right", "custom"] = "top-right"
+    width_pct: float = Field(default=18.0, ge=3, le=60)
+    opacity: float = Field(default=1.0, ge=0.05, le=1.0)
+    margin_px: int = Field(default=48, ge=0, le=400)
+    custom_x_pct: float = Field(default=82.0, ge=0, le=100)
+    custom_y_pct: float = Field(default=8.0, ge=0, le=100)
+    from_ms: int | None = Field(default=None, ge=0)
+    to_ms: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _asset(self) -> "LogoOverlay":
+        if self.enabled and not (self.asset_id and self.asset_name):
+            raise ValueError("A logo overlay needs an uploaded asset")
+        if self.from_ms is not None and self.to_ms is not None and self.to_ms <= self.from_ms:
+            raise ValueError("Logo end must be after its start")
+        return self
 
 
 class SegmentSpan(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(gt=0)
+    role: Literal["main", "hook"] = "main"
 
     @model_validator(mode="after")
     def _ordered(self) -> "SegmentSpan":
@@ -140,18 +200,34 @@ class SegmentSpan(BaseModel):
         return self.end_ms - self.start_ms
 
 
+class ProfileRef(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    version: int | None = None
+
+
 class RenderSpec(BaseModel):
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 2
     source_id: str
     segments: list[SegmentSpan] = Field(min_length=1, max_length=40)
     video: VideoSettings = Field(default_factory=VideoSettings)
     captions: CaptionSettings = Field(default_factory=CaptionSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
+    logo: LogoOverlay = Field(default_factory=LogoOverlay)
     title: str | None = None
+    hook: dict | None = None
+    chronological: bool = False
+    profile: ProfileRef = Field(default_factory=ProfileRef)
+    profile_snapshot: dict = Field(default_factory=dict)
+    edit_spec_id: str | None = None
 
     @property
     def total_duration_ms(self) -> int:
         return sum(segment.duration_ms for segment in self.segments)
+
+    @property
+    def hook_segments(self) -> list[SegmentSpan]:
+        return [segment for segment in self.segments if segment.role == "hook"]
 
     def validate_against(self, source_duration_ms: int) -> None:
         if source_duration_ms <= 0:
@@ -166,6 +242,24 @@ class RenderSpec(BaseModel):
             raise ValueError("The planned output is shorter than 2 seconds")
         if total > 15 * 60 * 1000:
             raise ValueError("The planned output is longer than 15 minutes")
+
+    def summary(self) -> dict:
+        return {
+            "version": self.version,
+            "aspect": self.video.aspect,
+            "resolution": self.video.resolution,
+            "dimensions": list(self.video.dimensions),
+            "segments": len(self.segments),
+            "hook": self.hook.get("text") if self.hook else None,
+            "captions": self.captions.enabled,
+            "captions_burned_in": self.captions.burn_in,
+            "captions_sidecar": self.captions.export_sidecar,
+            "audio_mode": self.audio.mode,
+            "logo": self.logo.enabled,
+            "profile": self.profile.model_dump(),
+            "total_ms": self.total_duration_ms,
+            "estimated": True,
+        }
 
 
 def caption_defaults(preset: str) -> dict:
@@ -182,20 +276,39 @@ def build_spec(
     caption_preset: str = "clean",
     captions_enabled: bool = True,
     caption_overrides: dict | None = None,
+    captions_burn_in: bool = True,
+    captions_sidecar: bool = False,
+    audio: dict | None = None,
+    logo: dict | None = None,
     fps: int | None = None,
     title: str | None = None,
+    hook: dict | None = None,
+    chronological: bool = False,
+    profile: dict | None = None,
+    profile_snapshot: dict | None = None,
+    edit_spec_id: str | None = None,
 ) -> RenderSpec:
     defaults = caption_defaults(caption_preset) if caption_preset != "custom" else {}
     payload = {
+        "version": 2,
         "source_id": source_id,
         "segments": segments,
         "video": {"aspect": aspect, "resolution": resolution, "framing": framing, "fps": fps},
         "captions": {
             "enabled": captions_enabled,
+            "burn_in": captions_burn_in,
+            "export_sidecar": captions_sidecar,
             "preset": caption_preset,
             **{k: v for k, v in defaults.items() if k != "label"},
             **(caption_overrides or {}),
         },
+        "audio": audio or {},
+        "logo": logo or {},
         "title": title,
+        "hook": hook,
+        "chronological": chronological,
+        "profile": profile or {},
+        "profile_snapshot": profile_snapshot or {},
+        "edit_spec_id": edit_spec_id,
     }
     return RenderSpec.model_validate(payload)

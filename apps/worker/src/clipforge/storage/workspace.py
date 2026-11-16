@@ -19,7 +19,7 @@ from pathlib import Path
 
 from clipforge.config import Settings
 from clipforge.errors import CapacityExceeded, ValidationFailed
-from clipforge.security.paths import assert_within, safe_join
+from clipforge.security.paths import safe_join
 
 PROJECT_SUBDIRS = ("source", "audio", "analysis", "renders", "tmp")
 
@@ -49,27 +49,20 @@ def free_bytes(path: Path) -> int:
 
 
 def ensure_space(settings: Settings, path: Path, required_bytes: int = 0) -> None:
+    """Check that a write of ``required_bytes`` fits, keeping a reserve.
+
+    The reserve is a floor for headroom, not a floor for the request: refusing a
+    2 MB upload because the disk has 1.4 GB free would be unhelpful. Callers pass
+    an estimate of how much their write needs (source plus derived files).
+    """
     free = free_bytes(path)
-    needed = max(required_bytes, settings.min_free_bytes)
+    needed = max(0, required_bytes) + settings.min_free_bytes
     if free < needed:
         raise CapacityExceeded(
-            f"Not enough free disk space. This needs about {needed // (1024 ** 3) + 1} GB free "
-            f"and only {free // (1024 ** 2)} MB is available.",
+            f"Not enough free disk space. This needs about "
+            f"{max(1, needed // (1024 ** 3) + 1)} GB free and only {free // (1024 ** 2)} MB is available.",
             code="insufficient_disk",
         )
-
-
-def project_relative(settings: Settings, path: Path) -> str:
-    return assert_within(settings.data_dir, path).relative_to(settings.data_dir.resolve()).as_posix()
-
-
-def absolute_from_relative(settings: Settings, relative: str) -> Path:
-    if relative.startswith("/") or "\\" in relative or ".." in relative.split("/"):
-        raise ValidationFailed("Invalid stored path")
-    resolved = (settings.data_dir / relative).resolve()
-    if settings.data_dir.resolve() not in resolved.parents:
-        raise ValidationFailed("Invalid stored path")
-    return resolved
 
 
 def write_json_atomic(path: Path, payload: dict | list) -> None:
@@ -109,3 +102,6 @@ def remove_project_workspace(settings: Settings, project_id: str) -> None:
         return
     if root.exists():
         shutil.rmtree(root, ignore_errors=True)
+    cached = settings.data_dir / "cache" / "projects" / project_id
+    if cached.exists():
+        shutil.rmtree(cached, ignore_errors=True)

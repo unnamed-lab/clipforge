@@ -44,7 +44,7 @@ def extract_audio(source: Path, destination: Path, *, cancel: threading.Event | 
     progress_args = args[:-2] + ["-progress", "pipe:1", "-nostats"] + args[-2:] if on_progress else args
     try:
         result = run(progress_args, timeout_seconds=1800, cancel=cancel, on_stdout_line=handle_progress)
-    except ProcessCancelled as exc:
+    except ProcessCancelled:
         raise
     except ProcessTimeout as exc:
         raise AppError("Audio extraction timed out", code="audio_timeout") from exc

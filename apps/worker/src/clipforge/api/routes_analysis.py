@@ -65,6 +65,9 @@ def patch_candidate(project_id: str, candidate_id: str, payload: CandidatePatch,
         updated = state.repos.candidates.reset_edits(project_id, candidate_id)
         return {"candidate": updated}
 
+    if payload.clear_hook:
+        current = state.repos.candidates.clear_hook(project_id, candidate_id)
+
     start = payload.start_ms if payload.start_ms is not None else current["start_ms"]
     end = payload.end_ms if payload.end_ms is not None else current["end_ms"]
     if payload.start_ms is not None or payload.end_ms is not None:
@@ -78,6 +81,40 @@ def patch_candidate(project_id: str, candidate_id: str, payload: CandidatePatch,
         except ValueError as exc:
             raise ValidationFailed(str(exc), code="invalid_span") from exc
 
+    hook_payload = None
+    if payload.hook is not None:
+        existing = dict(current.get("hook_detail") or {})
+        changes = payload.hook.model_dump(exclude_none=True)
+        merged = {**existing, **changes}
+        hook_start = merged.get("start_ms")
+        hook_end = merged.get("end_ms")
+        text = (merged.get("text") or "").strip()
+        if hook_start is None or hook_end is None:
+            raise ValidationFailed("A hook needs a start and an end time", code="invalid_hook")
+        try:
+            hook_start, hook_end = validate_span(
+                int(hook_start), int(hook_end), int(source["duration_ms"]), min_ms=500, max_ms=15_000
+            )
+        except ValueError as exc:
+            raise ValidationFailed(str(exc), code="invalid_hook") from exc
+        if not text:
+            raise ValidationFailed(
+                "A hook needs its real transcript text; Clipforge does not invent dialogue.",
+                code="hook_text_missing",
+            )
+        hook_payload = {
+            **merged,
+            "text": text[:300],
+            "start_ms": hook_start,
+            "end_ms": hook_end,
+            "duration_ms": hook_end - hook_start,
+            "source": merged.get("source") or "external",
+            "placement": merged.get("placement") or "before",
+            "approved": merged.get("approved", True),
+            "edited": True,
+            "estimated": True,
+        }
+
     updated = state.repos.candidates.update(
         project_id,
         candidate_id,
@@ -85,6 +122,8 @@ def patch_candidate(project_id: str, candidate_id: str, payload: CandidatePatch,
         end_ms=end if payload.end_ms is not None else None,
         decision=payload.decision,
         title=payload.title,
+        summary=payload.summary,
+        hook=hook_payload,
     )
     state.repos.projects.touch(project_id)
     return {"candidate": serialise_candidate(updated)}

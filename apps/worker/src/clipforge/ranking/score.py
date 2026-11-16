@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from clipforge.ranking.features import COMPONENT_LABELS, Component, FeatureSet, extract_features
+from clipforge.ranking.features import COMPONENT_LABELS, FeatureSet, extract_features
 from clipforge.ranking.generate import CandidateDraft
 from clipforge.ranking.lexicon import FILLER_STARTS
 from clipforge.ranking.sentences import TranscriptModel
@@ -103,6 +103,10 @@ class ScoredCandidate:
     method_version: str = BASELINE_VERSION
     duplicate_of: str | None = None
     weight_map: dict[str, float] = field(default_factory=dict)
+    brief: dict = field(default_factory=dict)
+    brief_relevance: float | None = None
+    hook_detail: dict = field(default_factory=dict)
+    summary: str = ""
 
     @property
     def start_ms(self) -> int:
@@ -129,7 +133,7 @@ class ScoredCandidate:
         return self.features.category
 
     def scores_payload(self) -> dict:
-        return {
+        payload = {
             "overall": round(self.overall, 1),
             "components": {key: component.to_dict() for key, component in self.features.components.items()},
             "weights": self.weight_map,
@@ -138,6 +142,9 @@ class ScoredCandidate:
             "estimated": True,
             "note": "Estimated editorial quality from transcript features, not a prediction of engagement.",
         }
+        if self.brief:
+            payload["brief"] = self.brief
+        return payload
 
 
 def _clean_title(text: str) -> str:

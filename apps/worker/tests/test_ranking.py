@@ -213,6 +213,14 @@ def test_goal_changes_the_ranking_weights_used(sample_segments, sample_sentences
 # --- deduplication ----------------------------------------------------------
 
 
+def _overlap_ratio(first, second) -> float:
+    start = max(first.start_ms, second.start_ms)
+    end = min(first.end_ms, second.end_ms)
+    overlap = max(0, end - start)
+    shortest = min(first.end_ms - first.start_ms, second.end_ms - second.start_ms)
+    return overlap / shortest if shortest else 0.0
+
+
 def test_selection_never_keeps_two_heavily_overlapping_candidates(sample_segments, sample_sentences):
     # given
     model = build_model(sample_segments, sample_sentences)
@@ -239,7 +247,11 @@ def test_selection_records_why_candidates_were_suppressed(sample_segments, sampl
     # then
     assert selection.suppressed
     assert all(reason for _, reason in selection.suppressed)
-    assert all(candidate.duplicate_of for candidate, _ in selection.suppressed if reason != "timeline_spread")
+    assert all(
+        candidate.duplicate_of
+        for candidate, reason in selection.suppressed
+        if reason != "timeline_spread"
+    )
 
 
 def test_selection_caps_the_result_at_the_requested_count(sample_segments, sample_sentences):

@@ -10,7 +10,11 @@ from dataclasses import dataclass
 
 from clipforge.rendering.spec import CaptionSettings, RenderSpec
 
-ALIGNMENT = {"bottom": 2, "center": 5, "top": 8}
+ALIGNMENT = {
+    ("bottom", "left"): 1, ("bottom", "center"): 2, ("bottom", "right"): 3,
+    ("center", "left"): 4, ("center", "center"): 5, ("center", "right"): 6,
+    ("top", "left"): 7, ("top", "center"): 8, ("top", "right"): 9,
+}
 CHUNK_GAP_MS = 700
 CHUNK_TAIL_MS = 160
 
@@ -64,16 +68,29 @@ def _wrap(words: list[CaptionWord], words_per_line: int, max_lines: int) -> list
 
 def _chunk(words: list[CaptionWord], settings: CaptionSettings) -> list[list[CaptionWord]]:
     capacity = max(1, settings.max_words_per_line * settings.max_lines)
+    char_capacity = settings.max_chars_per_line * settings.max_lines if settings.max_chars_per_line else 0
     chunks: list[list[CaptionWord]] = []
     current: list[CaptionWord] = []
+    current_chars = 0
     for word in words:
         if current:
             gap = word.start_ms - current[-1].end_ms
             ends_sentence = current[-1].text.rstrip().endswith((".", "!", "?", "…", ","))
-            if gap >= CHUNK_GAP_MS or len(current) >= capacity or (ends_sentence and len(current) >= settings.max_words_per_line):
+            too_many_words = len(current) >= capacity
+            too_many_chars = bool(char_capacity) and current_chars + len(word.text) + 1 > char_capacity
+            too_fast = False
+            if settings.reading_speed_cps and len(current) >= 1:
+                duration = max(1, current[-1].end_ms - current[0].start_ms) / 1000
+                projected = (current_chars + len(word.text) + 1) / duration
+                too_fast = projected > settings.reading_speed_cps and len(current) >= 2
+            if gap >= CHUNK_GAP_MS or too_many_words or too_many_chars or too_fast or (
+                ends_sentence and len(current) >= settings.max_words_per_line
+            ):
                 chunks.append(current)
                 current = []
+                current_chars = 0
         current.append(word)
+        current_chars += len(word.text) + 1
     if current:
         chunks.append(current)
     return chunks
@@ -84,19 +101,24 @@ def _render_event(chunk: list[CaptionWord], active_index: int, settings: Caption
     lines = _wrap(chunk, settings.max_words_per_line, settings.max_lines)
     highlight = _ass_color(settings.highlight_color)
     primary = _ass_color(settings.primary_color)
+    effect = ""
+    if settings.animation == "fade":
+        effect = "{\\fad(80,80)}"
+    elif settings.animation == "pop":
+        effect = "{\\fscx86\\fscy86\\t(0,110,\\fscx100\\fscy100)}"
     flat_index = 0
     rendered_lines: list[str] = []
     for line in lines:
         pieces: list[str] = []
         for token in line:
             escaped = _escape(token.upper() if settings.uppercase else token)
-            if flat_index == active_index:
+            if settings.highlight == "word" and flat_index == active_index:
                 pieces.append(f"{{\\c{highlight}}}{escaped}{{\\c{primary}}}")
             else:
                 pieces.append(escaped)
             flat_index += 1
         rendered_lines.append(" ".join(pieces))
-    text = "\\N".join(rendered_lines)
+    text = effect + "\\N".join(rendered_lines)
     return f"Dialogue: 0,{_ass_time(start_ms)},{_ass_time(end_ms)},Caption,,0,0,0,,{text}"
 
 
@@ -113,8 +135,13 @@ def build_ass(
     outline = max(0.0, captions.outline_width * (height / 1080))
 
     border_style = 3 if captions.background else 1
-    back_colour = "&H99000000" if captions.background else "&H64000000"
+    if captions.background:
+        alpha = int(round((100 - captions.background_opacity) / 100 * 255))
+        back_colour = f"&H{alpha:02X}000000"
+    else:
+        back_colour = "&HFF000000"
     outline_colour = _ass_color(captions.outline_color)
+    align = ALIGNMENT[(captions.position, captions.alignment)]
 
     header = [
         "[Script Info]",
@@ -131,7 +158,7 @@ def build_ass(
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         "Style: Caption,{font},{size},{primary},&H00FFFFFF,{outline_col},{back},"
-        "{bold},0,0,0,100,100,0,0,{border},{outline:.1f},0,{align},80,80,{margin},1".format(
+        "{bold},0,0,0,100,100,0,0,{border},{outline:.1f},{shadow:.1f},{align},80,80,{margin},1".format(
             font=captions.font_family,
             size=font_size,
             primary=_ass_color(captions.primary_color),
@@ -140,7 +167,8 @@ def build_ass(
             bold=-1 if captions.bold else 0,
             border=border_style,
             outline=outline,
-            align=ALIGNMENT[captions.position],
+            shadow=captions.shadow,
+            align=align,
             margin=captions.margin_v,
         ),
         "",
@@ -182,3 +210,38 @@ def build_ass(
         timeline_cursor += span_length
 
     return "\n".join(header + events) + "\n"
+
+
+def _srt_time(ms: int) -> str:
+    ms = max(0, int(ms))
+    hours, remainder = divmod(ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def build_srt(spans: list[tuple[int, int]], words_per_span: list[list[dict]]) -> str:
+    """Sidecar subtitles on the assembled timeline (no styling, widely compatible)."""
+    blocks: list[str] = []
+    cursor = 0
+    index = 1
+    for (span_start, span_end), raw_words in zip(spans, words_per_span):
+        span_length = max(0, span_end - span_start)
+        words: list[CaptionWord] = []
+        for raw in raw_words:
+            begin = max(span_start, int(raw.get("start_ms", span_start)))
+            finish = min(span_end, int(raw.get("end_ms", begin + 120)))
+            text = str(raw.get("word", "")).strip()
+            if text and finish > begin:
+                words.append(CaptionWord(cursor + begin - span_start, cursor + finish - span_start, text))
+        for chunk_start in range(0, len(words), 8):
+            chunk = words[chunk_start : chunk_start + 8]
+            if not chunk:
+                continue
+            begin = chunk[0].start_ms
+            end = max(begin + 200, chunk[-1].end_ms)
+            text = " ".join(word.text for word in chunk)
+            blocks.append(f"{index}\n{_srt_time(begin)} --> {_srt_time(end)}\n{text}\n")
+            index += 1
+        cursor += span_length
+    return "\n".join(blocks)

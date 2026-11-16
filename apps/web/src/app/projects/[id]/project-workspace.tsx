@@ -20,7 +20,7 @@ import type {
 } from "@clipforge/shared";
 import { formatBytes, formatDuration, formatTimecode } from "@clipforge/shared";
 import { apiJson, messageFrom } from "@/lib/api";
-import { Alert, Badge, SectionHeading } from "@/components/ui";
+import { Alert, Badge } from "@/components/ui";
 import { JobPanel } from "@/components/job-panel";
 import { AnalysisPanel } from "./analysis-panel";
 import { CandidateRail } from "./candidate-rail";
