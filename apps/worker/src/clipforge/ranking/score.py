@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from clipforge.durations import duration_record
 from clipforge.ranking.features import COMPONENT_LABELS, FeatureSet, extract_features
 from clipforge.ranking.generate import CandidateDraft
 from clipforge.ranking.lexicon import FILLER_STARTS
@@ -106,6 +107,9 @@ class ScoredCandidate:
     brief: dict = field(default_factory=dict)
     brief_relevance: float | None = None
     hook_detail: dict = field(default_factory=dict)
+    hook_candidates: list[dict] = field(default_factory=list)
+    editorial: dict = field(default_factory=dict)
+    duration: dict = field(default_factory=dict)
     summary: str = ""
 
     @property
@@ -144,6 +148,8 @@ class ScoredCandidate:
         }
         if self.brief:
             payload["brief"] = self.brief
+        if self.duration:
+            payload["duration"] = self.duration
         return payload
 
 
@@ -191,6 +197,7 @@ def score_candidates(
     *,
     goal: str = "best_moments",
     weight_overrides: dict[str, float] | None = None,
+    duration_range=None,
 ) -> list[ScoredCandidate]:
     weights = weights_for(goal, weight_overrides)
     scored: list[ScoredCandidate] = []
@@ -206,6 +213,17 @@ def score_candidates(
             reason="",
             weight_map=weights,
         )
+        if duration_range is not None:
+            fit = duration_range.proximity(draft.duration_ms)
+            status = duration_range.fit_status(draft.duration_ms)
+            candidate.duration = duration_record(duration_range, draft.duration_ms)
+            candidate.duration["generated_ms"] = draft.duration_ms
+            # Duration is a preference, not a hard filter. A strong moment that
+            # is slightly outside the target can still beat a weaker in-range
+            # window, but it must not win on content alone by a wide margin.
+            candidate.overall = round((0.88 * (total * 100)) + (0.12 * fit * 100), 1)
+            if status != "fit":
+                candidate.features.warnings.append(candidate.duration["reason"])
         candidate.reason = _build_reason(candidate)
         scored.append(candidate)
     scored.sort(key=lambda item: item.overall, reverse=True)

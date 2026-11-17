@@ -261,3 +261,34 @@ def test_empty_word_lists_produce_no_events():
 
     # then
     assert not [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+
+
+# --- request overrides -------------------------------------------------------
+
+
+def test_caption_overrides_only_apply_fields_the_client_sent():
+    # given a profile caption config and a client that only picked a font
+    from clipforge.api.models import RenderRequest
+    from clipforge.api.routes_renders import _caption_overrides
+
+    settings = {
+        "captions": {
+            "max_chars_per_line": 40,
+            "shadow": 1.5,
+            "background_opacity": 80,
+            "highlight_words": False,
+        }
+    }
+    payload = RenderRequest(candidate_id="can_1", captions={"font_family": "Bebas Neue"})
+
+    # when
+    overrides = _caption_overrides(settings, payload)
+
+    # then
+    assert overrides["font_family"] == "Bebas Neue"
+    assert overrides["max_chars_per_line"] == 40
+    assert overrides["background_opacity"] == 80
+    assert overrides["highlight"] == "none"
+    assert "margin_v" not in overrides
+    assert "max_words_per_line" not in overrides
+    assert "max_line_width_pct" not in overrides

@@ -62,12 +62,32 @@ class CandidatePatch(BaseModel):
     reset_edits: bool = False
 
 
+class BoundaryAction(BaseModel):
+    action: Literal["accept", "reject", "reset"]
+    end_ms: int | None = Field(default=None, ge=0)
+
+
+class EditorialAction(BaseModel):
+    """Re-evaluate a candidate under an explicit strategy or pacing profile."""
+
+    strategy: Literal[
+        "automatic", "chronological", "cold_open", "in_medias_res", "result_first",
+        "question_answer", "story_escalation", "reaction_led", "manual",
+    ] = "automatic"
+    pacing_profile: Literal["calm", "conversational", "balanced", "energetic", "fast"] | None = None
+    apply: bool = True
+
+
 class RenderRequest(BaseModel):
     candidate_id: str | None = None
     segments: list[dict] | None = None
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
     resolution: Literal[720, 1080] = 1080
     framing: Literal["crop", "blur"] = "crop"
+    composition: Literal["auto", "crop", "fit", "pip", "split", "manual"] = "auto"
+    composition_overrides: dict[str, dict] | None = None
+    crop_x_pct: float | None = Field(default=None, ge=0, le=100)
+    crop_y_pct: float | None = Field(default=None, ge=0, le=100)
     caption_preset: Literal["clean", "large", "minimal", "branded", "custom"] = "clean"
     captions_enabled: bool = True
     captions: CaptionSettings | None = None
@@ -76,6 +96,8 @@ class RenderRequest(BaseModel):
     audio: dict | None = None
     logo: dict | None = None
     include_hook: bool = True
+    apply_editorial: bool = True
+    approve_editorial: bool = False
     normalize_audio: bool = False
     override_policy: bool = False
     fps: int | None = Field(default=None, ge=15, le=60)

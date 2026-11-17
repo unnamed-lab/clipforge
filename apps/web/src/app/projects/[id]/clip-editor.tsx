@@ -22,6 +22,7 @@ import {
   scoreTone,
 } from "@clipforge/shared";
 import { Badge, ScoreMeter } from "@/components/ui";
+import { EDITORIAL_STRATEGIES } from "@clipforge/shared";
 import { RenderPanel } from "./render-panel";
 import { cn } from "@/lib/utils";
 
@@ -36,6 +37,8 @@ export function ClipEditor({
   hasWaveform,
   renders,
   onPatch,
+  onBoundary,
+  onEditorial,
   onRender,
   renderBusy,
 }: {
@@ -49,6 +52,11 @@ export function ClipEditor({
   onPatch: (
     candidateId: string,
     patch: { start_ms?: number; end_ms?: number; title?: string; decision?: Candidate["decision"]; reset_edits?: boolean },
+  ) => Promise<void>;
+  onBoundary: (candidateId: string, action: { action: "accept" | "reject" | "reset"; end_ms?: number }) => Promise<void>;
+  onEditorial: (
+    candidateId: string,
+    action: { strategy: string; pacing_profile?: string; apply?: boolean },
   ) => Promise<void>;
   onRender: (body: Record<string, unknown>) => Promise<void>;
   renderBusy: boolean;
@@ -64,6 +72,7 @@ export function ClipEditor({
   const [saving, setSaving] = useState(false);
   const [showScores, setShowScores] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
+  const [approveEditorial, setApproveEditorial] = useState(false);
 
   useEffect(() => {
     setStart(candidate.start_ms);
@@ -128,7 +137,12 @@ export function ClipEditor({
     if (dirty) {
       await onPatch(candidate.id, { start_ms: start, end_ms: end, title });
     }
-    await onRender({ ...body, candidate_id: candidate.id, title: title || candidate.title });
+    await onRender({
+      ...body,
+      candidate_id: candidate.id,
+      title: title || candidate.title,
+      approve_editorial: approveEditorial,
+    });
   }
 
   const tone = scoreTone(candidate.overall);
@@ -318,6 +332,20 @@ export function ClipEditor({
         </div>
       </section>
 
+      <EndingReview
+        candidate={candidate}
+        onUseEnd={(ms) => setEnd(clamp(ms, start + 1000, duration))}
+        onBoundary={onBoundary}
+      />
+
+      <EditorialPlan
+        candidate={candidate}
+        currentDurationMs={durationMs}
+        approveEditorial={approveEditorial}
+        onApproveEditorial={setApproveEditorial}
+        onEditorial={onEditorial}
+      />
+
       <TranscriptWindow
         transcript={transcript}
         start={start}
@@ -384,6 +412,407 @@ export function ClipEditor({
         disabledReason="Keep at least two seconds of footage before rendering."
       />
     </div>
+  );
+}
+
+function EditorialPlan({
+  candidate,
+  currentDurationMs,
+  approveEditorial,
+  onApproveEditorial,
+  onEditorial,
+}: {
+  candidate: Candidate;
+  currentDurationMs: number;
+  approveEditorial: boolean;
+  onApproveEditorial: (value: boolean) => void;
+  onEditorial: (
+    candidateId: string,
+    action: { strategy: string; pacing_profile?: string; apply?: boolean },
+  ) => Promise<void>;
+}) {
+  const editorial = candidate.editorial;
+  const decision = editorial?.editorial;
+  const duration = candidate.duration;
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  if (!editorial && !duration) return null;
+
+  const strategy = decision?.strategy ?? editorial?.strategy ?? "chronological";
+  const strategyLabel =
+    EDITORIAL_STRATEGIES.find((entry) => entry.id === strategy)?.label ??
+    (strategy === "chronological" ? "Chronological" : strategy);
+  const rationale = decision?.rationale ?? editorial?.rationale ?? "";
+  const confidence = decision?.confidence ?? editorial?.confidence ?? 0;
+  const concerns = [...(decision?.concerns ?? []), ...(editorial?.warnings ?? [])].filter(
+    (value, index, all) => value && all.indexOf(value) === index,
+  );
+  const alternatives = decision?.alternatives?.length
+    ? decision.alternatives
+    : editorial?.alternatives ?? [];
+  const timeline = (decision?.timeline ?? editorial?.timeline) as TimelineView | undefined;
+  const reviewRequired = Boolean(decision?.review_required ?? editorial?.review_required);
+  const reordered = Boolean(decision?.reordered ?? editorial?.reordered);
+  const applied = Boolean(decision?.applied ?? editorial?.applied);
+  const fallback = decision?.fallback ?? "";
+
+  const targetMin = duration?.min_ms;
+  const targetMax = duration?.max_ms;
+  // A reordered plan or removed pauses change the rendered duration. A manual
+  // trim wins over both, because that is the cut the renderer will export.
+  const actualDurationMs = candidate.edited
+    ? currentDurationMs
+    : (timeline?.total_output_ms ?? duration?.actual_ms ?? currentDurationMs);
+  const fit =
+    targetMin && targetMax
+      ? actualDurationMs < targetMin
+        ? "too_short"
+        : actualDurationMs > targetMax
+          ? "too_long"
+          : "fit"
+      : duration?.status ?? "unknown";
+  const planMatchesCut =
+    !candidate.edited ||
+    !duration?.actual_ms ||
+    Math.abs(actualDurationMs - duration.actual_ms) < 50;
+  const durationReason = planMatchesCut
+    ? duration?.reason
+    : `This manual cut is ${formatDuration(actualDurationMs)}; the generated plan was not changed.`;
+
+  async function reEvaluate(value: { strategy: string; pacing_profile?: string }) {
+    setBusy(value.strategy + (value.pacing_profile ?? ""));
+    setNotice(null);
+    try {
+      await onEditorial(candidate.id, { ...value, apply: true });
+      setNotice("Editorial plan re-evaluated. Manual trims and export settings are unchanged.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not re-evaluate the edit.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="surface space-y-3 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="label">Editorial plan</p>
+          <p className="mt-1 text-[12px] leading-relaxed text-mist-400">
+            The source-to-timeline map behind this cut. Captions, audio and video use the same order.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge tone={reordered ? "ember" : "neutral"}>{strategyLabel}</Badge>
+          <span className="numeric text-[11px] text-mist-500">
+            {Math.round(confidence * 100)}% confidence
+          </span>
+          {reviewRequired ? <Badge tone="warn">review required</Badge> : null}
+          {reordered ? (
+            <Badge tone={applied ? "good" : "neutral"}>{applied ? "reordered" : "reorder proposed"}</Badge>
+          ) : null}
+          {fallback ? <Badge tone="neutral">fell back from {fallback}</Badge> : null}
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-3">
+        <div className="rounded-md border border-white/8 bg-black/20 px-2.5 py-2">
+          <p className="text-[10.5px] uppercase tracking-wide text-mist-600">Actual duration</p>
+          <p className="numeric mt-0.5 text-[13px] text-mist-100">{formatDuration(actualDurationMs)}</p>
+        </div>
+        <div className="rounded-md border border-white/8 bg-black/20 px-2.5 py-2">
+          <p className="text-[10.5px] uppercase tracking-wide text-mist-600">Target range</p>
+          <p className="numeric mt-0.5 text-[13px] text-mist-100">
+            {targetMin && targetMax
+              ? `${formatDuration(targetMin)}-${formatDuration(targetMax)}`
+              : duration?.label ?? "Not set"}
+          </p>
+        </div>
+        <div className="rounded-md border border-white/8 bg-black/20 px-2.5 py-2">
+          <p className="text-[10.5px] uppercase tracking-wide text-mist-600">Fit</p>
+          <p
+            className={cn(
+              "mt-0.5 text-[12.5px]",
+              fit === "fit"
+                ? "text-signal-good"
+                : fit === "near"
+                  ? "text-signal-warn"
+                  : "text-mist-300",
+            )}
+          >
+            {fit.replace("_", " ")}
+          </p>
+        </div>
+      </div>
+      {durationReason ? (
+        <p className="text-[11.5px] leading-relaxed text-mist-500">{durationReason}</p>
+      ) : null}
+
+      {rationale ? (
+        <p className="text-[12px] leading-relaxed text-mist-300">{rationale}</p>
+      ) : null}
+
+      {timeline?.entries?.length ? (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <p className="label">Source → timeline</p>
+            <span className="numeric text-[10.5px] text-mist-600">
+              {formatDuration(timeline.total_output_ms ?? currentDurationMs)} output ·{" "}
+              {timeline.valid === false ? "invalid" : "validated"}
+            </span>
+          </div>
+          <div className="overflow-x-auto rounded-md border border-white/8">
+            <table className="w-full min-w-[560px] text-left text-[11px]">
+              <thead className="bg-black/30 text-mist-500">
+                <tr>
+                  <th className="px-2 py-1.5 font-medium">#</th>
+                  <th className="px-2 py-1.5 font-medium">Role</th>
+                  <th className="px-2 py-1.5 font-medium">Source</th>
+                  <th className="px-2 py-1.5 font-medium">Timeline</th>
+                  <th className="px-2 py-1.5 font-medium">Join</th>
+                  <th className="px-2 py-1.5 font-medium">Key point</th>
+                </tr>
+              </thead>
+              <tbody>
+                {timeline.entries.map((entry, index) => (
+                  <tr key={`${entry.source_start_ms}-${entry.output_start_ms}-${index}`} className="border-t border-white/6">
+                    <td className="numeric px-2 py-1.5 text-mist-600">{index + 1}</td>
+                    <td className="px-2 py-1.5 text-mist-200">{entry.role ?? "main"}</td>
+                    <td className="numeric px-2 py-1.5 text-mist-400">
+                      {formatTimecodePrecise(entry.source_start_ms)}–{formatTimecodePrecise(entry.source_end_ms)}
+                    </td>
+                    <td className="numeric px-2 py-1.5 text-mist-400">
+                      {formatTimecodePrecise(entry.output_start_ms)}–{formatTimecodePrecise(entry.output_end_ms)}
+                    </td>
+                    <td className="px-2 py-1.5 text-mist-500">{entry.transition ?? "cut"}</td>
+                    <td className="max-w-[240px] px-2 py-1.5 text-mist-400">
+                      {entry.key_point ? truncate(entry.key_point, 90) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {timeline.warnings?.length ? (
+            <ul className="space-y-0.5 text-[11px] text-signal-warn">
+              {timeline.warnings.map((warning) => (
+                <li key={warning}>· {warning}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : (
+        <p className="text-[11.5px] text-mist-500">
+          Source order is preserved. No source speech is duplicated or skipped.
+        </p>
+      )}
+
+      {alternatives.length > 0 ? (
+        <div className="space-y-1.5">
+          <p className="label">Alternatives</p>
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            {alternatives.map((alternative) => (
+              <div
+                key={`${alternative.id}-${alternative.strategy}`}
+                className="flex flex-col gap-1 rounded-md border border-white/8 bg-black/20 px-2.5 py-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[12px] text-mist-200">{alternative.label}</p>
+                  {alternative.available ? (
+                    <span className="numeric text-[10.5px] text-mist-500">
+                      {Math.round(alternative.confidence * 100)}%
+                    </span>
+                  ) : (
+                    <Badge tone="neutral">unavailable</Badge>
+                  )}
+                </div>
+                <p className="text-[11px] leading-snug text-mist-500">
+                  {alternative.available ? alternative.description || alternative.reason : alternative.reason}
+                </p>
+                {alternative.available ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm mt-0.5 h-6 self-start px-2 text-[11px]"
+                    disabled={busy !== null}
+                    onClick={() => void reEvaluate({ strategy: alternative.strategy })}
+                  >
+                    {busy?.startsWith(alternative.strategy) ? "Re-evaluating" : "Use this strategy"}
+                  </button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {concerns.length > 0 ? (
+        <div className="rounded-md border border-signal-warn/25 bg-signal-warn/[0.05] px-2.5 py-2">
+          <p className="text-[11.5px] font-medium text-signal-warn">Editorial concerns</p>
+          <ul className="mt-1 space-y-0.5 text-[11px] leading-relaxed text-mist-300">
+            {concerns.map((concern) => (
+              <li key={concern}>· {concern}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {reviewRequired && reordered ? (
+        <label className="flex items-start gap-2 rounded-md border border-signal-warn/25 bg-signal-warn/[0.05] px-2.5 py-2 text-[11.5px] text-mist-300">
+          <input
+            type="checkbox"
+            className="mt-0.5 size-3.5 accent-ember-500"
+            checked={approveEditorial}
+            onChange={(event) => onApproveEditorial(event.target.checked)}
+          />
+          <span>
+            I reviewed this non-linear edit. Export may apply the reordered timeline; without this
+            approval the render uses chronological order and records the fallback.
+          </span>
+        </label>
+      ) : null}
+
+      {notice ? <p className="text-[11.5px] text-signal-info">{notice}</p> : null}
+
+      <p className="text-[11px] leading-relaxed text-mist-600">
+        Re-evaluating uses the stored transcript. It does not re-transcribe, change your trim, or wipe
+        captions, branding or composition overrides.
+      </p>
+    </section>
+  );
+}
+
+type TimelineEntryView = {
+  role?: string;
+  key_point?: string;
+  source_start_ms: number;
+  source_end_ms: number;
+  output_start_ms: number;
+  output_end_ms: number;
+  transition?: string;
+};
+
+type TimelineView = {
+  entries?: TimelineEntryView[];
+  total_output_ms?: number;
+  valid?: boolean;
+  warnings?: string[];
+};
+
+function truncate(value: string, limit: number): string {
+  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+function EndingReview({
+  candidate,
+  onUseEnd,
+  onBoundary,
+}: {
+  candidate: Candidate;
+  onUseEnd: (ms: number) => void;
+  onBoundary: (candidateId: string, action: { action: "accept" | "reject" | "reset"; end_ms?: number }) => Promise<void>;
+}) {
+  const boundary = candidate.boundary;
+  const evidence = boundary?.evidence ?? [];
+  const alternatives = boundary?.alternatives ?? [];
+  const [busy, setBusy] = useState<string | null>(null);
+  if (!boundary || (evidence.length === 0 && alternatives.length === 0)) return null;
+
+  async function act(action: "accept" | "reject" | "reset", endMs?: number) {
+    setBusy(action);
+    try {
+      await onBoundary(candidate.id, { action, end_ms: endMs });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section
+      className={cn(
+        "surface space-y-2.5 p-4",
+        boundary.suspicious && boundary.reviewed === "pending" && "border-signal-warn/30",
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="label">Ending review</p>
+        <div className="flex items-center gap-1.5">
+          {boundary.suspicious ? <Badge tone="ember">possible trailing shot</Badge> : <Badge tone="neutral">no strong signal</Badge>}
+          {boundary.reviewed !== "pending" ? (
+            <Badge tone={boundary.reviewed === "accepted" ? "good" : "bad"}>{boundary.reviewed}</Badge>
+          ) : null}
+        </div>
+      </div>
+
+      <p className="text-[12px] leading-relaxed text-mist-400">
+        The pipeline checked the transcript and scene cuts around the out point. It never trims on its own.
+        {boundary.current_sentence ? ` Last sentence: “${boundary.current_sentence.slice(-140)}”` : ""}
+      </p>
+
+      {evidence.length > 0 ? (
+        <ul className="space-y-1 text-[11.5px] leading-relaxed text-mist-400">
+          {evidence.slice(0, 6).map((item) => (
+            <li key={item}>· {item}</li>
+          ))}
+        </ul>
+      ) : null}
+
+      {alternatives.length > 1 ? (
+        <div className="space-y-1.5">
+          {alternatives.map((alternative) => (
+            <div
+              key={`${alternative.end_ms}-${alternative.source}`}
+              className="flex flex-wrap items-center gap-2 rounded-md border border-white/8 bg-black/20 px-2.5 py-2"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-[12px] text-mist-200">{alternative.label}</p>
+                <p className="text-[11px] leading-snug text-mist-500">{alternative.reason}</p>
+              </div>
+              <span className="numeric text-[11px] text-mist-400">
+                out {formatTimecodePrecise(alternative.end_ms)} · {Math.round(alternative.confidence * 100)}%
+              </span>
+              {alternative.source === "current" ? null : (
+                <button
+                  type="button"
+                  className="btn btn-sm h-6 px-2 text-[11px]"
+                  disabled={busy !== null}
+                  onClick={() => {
+                    onUseEnd(alternative.end_ms);
+                    void act("accept", alternative.end_ms);
+                  }}
+                >
+                  {busy === "accept" ? "Saving" : "Use this ending"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        {boundary.reviewed === "pending" ? (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm h-6 px-2 text-[11px]"
+            disabled={busy !== null}
+            onClick={() => void act("reject")}
+          >
+            Keep current out point
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm h-6 px-2 text-[11px]"
+            disabled={busy !== null}
+            onClick={() => void act("reset")}
+          >
+            Reset review
+          </button>
+        )}
+        <span className="text-[10.5px] text-mist-600">
+          Accepting writes the out point; rejecting leaves the clip untouched.
+        </span>
+      </div>
+    </section>
   );
 }
 

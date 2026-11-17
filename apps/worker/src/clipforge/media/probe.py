@@ -85,7 +85,7 @@ def probe(path: Path, *, timeout_seconds: float = 60) -> MediaInfo:
                 ffprobe, "-v", "error", "-print_format", "json",
                 "-show_format", "-show_streams", "-show_entries",
                 "format=duration,size,bit_rate,format_name:stream=index,codec_type,codec_name,width,height,"
-                "avg_frame_rate,r_frame_rate,duration,channels,side_data_list:stream_tags=rotate",
+                "avg_frame_rate,r_frame_rate,duration,start_time,channels,side_data_list:stream_tags=rotate",
                 str(path),
             ],
             timeout_seconds=timeout_seconds,

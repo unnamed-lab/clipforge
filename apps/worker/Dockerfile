@@ -1,5 +1,8 @@
-# syntax=docker/dockerfile:1.7
 # CPU-only worker image. Build context is the repository root.
+#
+# Uses the builder's built-in Dockerfile frontend instead of pulling a floating
+# `docker/dockerfile` image; every instruction below is supported by the
+# BuildKit frontend shipped with current Docker and by Render's builder.
 #
 # The image deliberately does not contain models, media, credentials or the
 # SQLite database. Those live on the mounted data volume at /data.
@@ -30,8 +33,12 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.
 WORKDIR /app
 
 # Runtime pins first, then the project without resolving dependencies again.
+# Keep pip's download cache in a BuildKit mount, not the image layer, so a
+# transient package-index timeout can be retried without re-downloading the
+# whole set. PIP_NO_CACHE_DIR stays on for every other layer.
 COPY apps/worker/requirements.lock ./
-RUN python -m pip install -r requirements.lock
+RUN --mount=type=cache,id=clipforge-pip,target=/root/.cache/pip \
+    PIP_NO_CACHE_DIR=0 python -m pip install --retries 10 --timeout 60 -r requirements.lock
 
 COPY apps/worker/pyproject.toml ./
 COPY apps/worker/src ./src

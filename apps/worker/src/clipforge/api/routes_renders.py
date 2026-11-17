@@ -10,7 +10,7 @@ from clipforge.api.deps import get_state
 from clipforge.api.models import RenderRequest
 from clipforge.errors import Conflict, NotFound, ValidationFailed
 from clipforge.profiles.spec import profile_snapshot, resolve_settings
-from clipforge.rendering.spec import RenderSpec, build_spec
+from clipforge.rendering.spec import CompositionDecision, RenderSpec, build_spec
 from clipforge.security.paths import display_name
 from clipforge.storage.base import StorageObjectMissing, ensure_local
 
@@ -40,7 +40,9 @@ def _caption_overrides(settings: dict, payload: RenderRequest) -> dict:
         "highlight": "word" if captions.get("highlight_words", True) else "none",
     }
     if payload.captions is not None:
-        overrides.update(payload.captions.model_dump())
+        # Only fields the client actually sent may override the profile/preset.
+        # Dumping defaults here would silently reset geometry the UI never touched.
+        overrides.update(payload.captions.model_dump(exclude_unset=True))
     return overrides
 
 
@@ -82,8 +84,34 @@ def _logo_payload(settings: dict, payload: RenderRequest) -> tuple[dict, bool]:
     return values, override
 
 
-def _segments_for(payload: RenderRequest, candidate: dict, source: dict) -> tuple[list[dict], dict | None]:
-    segments = [{"start_ms": candidate["start_ms"], "end_ms": candidate["end_ms"], "role": "main"}]
+def _editorial_summary(plan: dict, *, applied: bool, fallback: str = "") -> dict:
+    decision = plan.get("editorial") or {}
+    timeline = plan.get("timeline") or {}
+    return {
+        "strategy": decision.get("strategy"),
+        "label": decision.get("label"),
+        "rationale": decision.get("rationale"),
+        "confidence": decision.get("confidence"),
+        "reordered": bool(decision.get("reordered")),
+        "applied": applied,
+        "review_required": bool(decision.get("review_required")),
+        "concerns": decision.get("concerns") or [],
+        "fallback": fallback or decision.get("fallback") or "",
+        "timeline_warnings": timeline.get("warnings") or [],
+        "timeline": timeline,
+    }
+
+
+def _segments_for(
+    payload: RenderRequest, candidate: dict, source: dict
+) -> tuple[list[dict], dict | None, dict]:
+    """Resolve the edit that will actually render.
+
+    Manual trims win over any generated plan. A generated non-linear plan is used
+    only when it is valid, and a plan marked for review is not applied silently:
+    the caller must approve it or the chronological baseline is rendered.
+    """
+    source_duration = int(source["duration_ms"])
     detail = candidate.get("hook_detail") or {}
     hook = None
     if detail:
@@ -95,18 +123,49 @@ def _segments_for(payload: RenderRequest, candidate: dict, source: dict) -> tupl
             "placement": detail.get("placement"),
             "approved": detail.get("approved"),
         }
+
+    chronological = [{"start_ms": candidate["start_ms"], "end_ms": candidate["end_ms"], "role": "main"}]
+    plan = candidate.get("editorial") or {}
+    decision = plan.get("editorial") or {}
+    timeline = plan.get("timeline") or {}
+    fallback = ""
+
+    if candidate.get("edited"):
+        fallback = "manual_trim"
+    elif not payload.apply_editorial:
+        fallback = "editorial_disabled"
+    elif not timeline.get("valid", False) or not timeline.get("entries"):
+        fallback = "timeline_unavailable"
+    elif decision.get("reordered") and decision.get("review_required") and not payload.approve_editorial:
+        fallback = "review_not_approved"
+
+    if not fallback:
+        segments = []
+        for entry in timeline.get("entries") or []:
+            role = entry.get("role", "main")
+            if role == "hook" and not payload.include_hook:
+                continue
+            start = int(entry.get("source_start_ms", -1))
+            end = int(entry.get("source_end_ms", -1))
+            if start < 0 or end <= start or end > source_duration:
+                fallback = "invalid_timeline_span"
+                break
+            segments.append({"start_ms": start, "end_ms": end, "role": role})
+        if not fallback and segments:
+            return segments, hook, _editorial_summary(plan, applied=True)
+
+    segments = list(chronological)
     if (
         payload.include_hook
         and hook
         and hook.get("approved")
         and hook.get("placement") == "before"
-        and not candidate.get("edited")
         and isinstance(hook.get("start_ms"), int)
     ):
         start, end = int(hook["start_ms"]), int(hook["end_ms"])
-        if 0 <= start < end <= int(source["duration_ms"]):
+        if 0 <= start < end <= source_duration:
             segments.insert(0, {"start_ms": start, "end_ms": end, "role": "hook"})
-    return segments, hook
+    return segments, hook, _editorial_summary(plan, applied=False, fallback=fallback or "chronological")
 
 
 def _checks(settings: dict, captions_enabled: bool, logo: dict, audio: dict, override: bool,
@@ -187,12 +246,15 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
 
     candidate_id = None
     hook = None
+    editorial: dict = {}
+    duration: dict = {}
     if payload.candidate_id:
         candidate = state.repos.candidates.get(project_id, payload.candidate_id)
         if candidate["decision"] == "rejected":
             raise Conflict("That candidate was rejected. Restore it before rendering.")
         candidate_id = candidate["id"]
-        segments, hook = _segments_for(payload, candidate, source)
+        segments, hook, editorial = _segments_for(payload, candidate, source)
+        duration = candidate.get("duration") or {}
         title = payload.title or candidate.get("title")
     elif payload.segments:
         segments = []
@@ -234,6 +296,9 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
             aspect=aspect,
             resolution=resolution,
             framing=framing,
+            composition=payload.composition if "composition" in explicit else "auto",
+            crop_x_pct=payload.crop_x_pct,
+            crop_y_pct=payload.crop_y_pct,
             caption_preset=caption_preset,
             captions_enabled=captions_enabled,
             caption_overrides=_caption_overrides(settings, payload),
@@ -244,12 +309,26 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
             fps=fps,
             title=title,
             hook=hook,
+            editorial=editorial,
+            duration=duration,
             chronological=bool(settings["brief"].get("hook", {}).get("strict_chronological", False)),
             profile={"id": (profile or {}).get("id"), "name": (profile or {}).get("name"),
                      "version": (profile or {}).get("version")},
             profile_snapshot=snapshot,
             edit_spec_id=None,
         )
+        for key, raw in (payload.composition_overrides or {}).items():
+            try:
+                index = int(key)
+                decision = CompositionDecision.model_validate(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValidationFailed("A composition override is invalid", code="invalid_composition") from exc
+            if index < 0 or index >= len(spec.segments):
+                raise ValidationFailed(
+                    f"Composition override {key} does not match a segment", code="invalid_composition"
+                )
+            decision.auto = False
+            spec.segments[index].composition = decision
         spec.validate_against(source_duration)
     except ValueError as exc:
         raise ValidationFailed(str(exc), code="invalid_render_spec") from exc
@@ -325,6 +404,30 @@ def download_render(render_id: str, request: Request):
     if not filename.lower().endswith(".mp4"):
         filename += ".mp4"
     return FileResponse(path, media_type="video/mp4", filename=filename, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/renders/{render_id}/draft")
+def download_render_draft(render_id: str, request: Request):
+    state = get_state(request)
+    raw = state.repos.renders.get_raw(render_id)
+    review = json.loads(raw.get("review_json") or "{}")
+    relative_path = review.get("draft_relative_path")
+    if not relative_path:
+        raise NotFound("That render has no preserved draft")
+    try:
+        path = ensure_local(
+            state.storage,
+            relative_path,
+            missing_message="The render draft is no longer in storage",
+        )
+    except StorageObjectMissing as exc:
+        raise NotFound(exc.message) from exc
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"{render_id}.draft.mp4",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/renders/{render_id}/stream")

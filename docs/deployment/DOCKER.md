@@ -180,7 +180,8 @@ the internet and a service that can process local media.
 
 `apps/web/Dockerfile`
 
-- `node:22.14.0-bookworm-slim`, pnpm `12.11.2` via corepack.
+- `node:22.14.0-bookworm-slim`, pnpm `12.11.2` installed with npm (the corepack
+  shim expects a file pnpm 12 no longer ships).
 - Multi-stage: manifests → frozen install → build → standalone runner.
 - `output: "standalone"` with `outputFileTracingRoot` at the monorepo root, so the
   workspace package and pnpm links are traced correctly.

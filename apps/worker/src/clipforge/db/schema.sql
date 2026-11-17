@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     user_start_ms   INTEGER,
     user_end_ms     INTEGER,
     duplicate_of    TEXT,
+    boundary_json   TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -121,6 +122,7 @@ CREATE TABLE IF NOT EXISTS renders (
     height        INTEGER,
     error_code    TEXT,
     error_message TEXT,
+    review_json   TEXT NOT NULL DEFAULT '{}',
     created_at    TEXT NOT NULL,
     finished_at   TEXT
 );

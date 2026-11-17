@@ -212,20 +212,33 @@ Render Private Service (FastAPI API + job queue + FFmpeg, exactly 1 instance)
 | Web tests | same | 4 passed |
 | Worker tests | same + `python -m pytest apps/worker/tests -q` | passed (non-slow suite) |
 | Production web build | same (`next build`, no standalone tracing on Windows) | passed |
+| Web Docker image | `docker build -f apps/web/Dockerfile -t clipforge-web:check .` | passed, standalone image (~408 MB) |
+| Compose config / missing secret | `node scripts/docker-verify.mjs` | passed (missing token rejected, valid config accepted) |
 
 ### Attempted but not proven here
 
-`node scripts/docker-verify.mjs` verified that Compose rejects a missing
-`CLIPFORGE_WORKER_TOKEN` and accepts the completed configuration. The image build
-then exposed two real defects, both fixed:
+The container checks exposed real defects, all fixed:
 
 - Corepack's pnpm shim expected `bin/pnpm.cjs`, which pnpm 12 no longer ships.
   The web image now installs the pinned CLI with npm.
+- The web build was not requesting standalone output. The builder stage now sets
+  `NEXT_OUTPUT=standalone`.
 - The worker image's Debian mirror used plain HTTP and timed out. The Dockerfile
   now uses HTTPS with bounded retries.
+- A `USER clipforge` line would have prevented the entrypoint from claiming a
+  root-owned Render disk. The image now starts as root only in the entrypoint and
+  drops to UID 1001 before uvicorn.
+- Pip had no retry budget or reusable download cache. It now retries with a
+  BuildKit cache mount.
+- The worker wheel omitted `clipforge/db/schema.sql`. A source checkout and an
+  editable install hid this, but a clean container crashed at startup because
+  the file was missing from site-packages. `pyproject.toml` now declares it as
+  package data; the built image contains it.
 
-A full image build and smoke test did not complete because the host disk fell to
-roughly 0.25-0.76 GB free and Docker Desktop repeatedly stalled. This is an
-environment limitation, not a passing result. No live Render deploy or live
-Supabase bucket was exercised. The `supabase/storage-api:latest` path is covered
-by mocked REST tests, not by a running storage container.
+A complete worker image build and Compose smoke test still did not finish on this
+machine. Repeated attempts hit PyPI read timeouts, Docker Hub TLS handshakes, and
+Docker Desktop BuildKit frontend crashes. The host also fell to roughly 0.25 GB
+free before stale verification processes were stopped. These are environment
+failures, not passing results. No live Render deploy or live Supabase bucket was
+exercised. The `supabase/storage-api:latest` path is covered by mocked REST tests,
+not by a running storage container.

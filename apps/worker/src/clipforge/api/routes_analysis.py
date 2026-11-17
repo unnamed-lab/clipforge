@@ -3,9 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from clipforge.api.deps import get_state
-from clipforge.api.models import AnalysisRequest, CandidatePatch
-from clipforge.db.repositories import serialise_candidate
+from clipforge.api.models import AnalysisRequest, BoundaryAction, CandidatePatch, EditorialAction
+from clipforge.briefs.spec import ClippingBrief
+from clipforge.durations import duration_record
+from clipforge.editorial.narrative import build_retention_plan
 from clipforge.errors import Conflict, NotFound, ValidationFailed
+from clipforge.ranking.sentences import build_transcript_model
 from clipforge.security.limits import MIN_CLIP_MS, validate_span
 
 router = APIRouter(prefix="/api", tags=["analysis"])
@@ -29,11 +32,29 @@ def start_analysis(project_id: str, payload: AnalysisRequest, request: Request) 
         return {"job": active, "deduplicated": True}
 
     payload_dict = payload.model_dump()
+    brief = payload.brief or {}
+    editorial = brief.get("editorial") or {}
     job = state.queue.enqueue(project_id=project_id, job_type="analysis", payload=payload_dict)
     state.repos.projects.update(
         project_id,
         status="analysing",
-        goals={"goal": payload.goal, "clip_count": payload.clip_count, "duration_band": payload.duration_band},
+        goals={
+            "goal": payload.goal,
+            "clip_count": payload.clip_count,
+            "duration_band": payload.duration_band,
+            "duration_preset": brief.get("duration_preset") or "extended",
+            "duration_min_ms": brief.get("min_duration_ms"),
+            "duration_max_ms": brief.get("max_duration_ms"),
+            "editorial_style": editorial.get("style") or "automatic",
+            "editorial_strategy": editorial.get("preferred_strategy") or "automatic",
+            "genre": editorial.get("genre") or "auto",
+            "pacing": (brief.get("pacing") or {}).get("profile") or "balanced",
+            "flashback": editorial.get("flashback") or "automatic",
+            "hook_preference": editorial.get("hook_preference") or "auto",
+            "pattern_interrupts": editorial.get("pattern_interrupt_intensity") or "balanced",
+            "reaction_shots": editorial.get("reaction_shots") or "automatic",
+            "loop_ending": editorial.get("loop_ending") or "automatic",
+        },
     )
     return {"job": job, "deduplicated": False}
 
@@ -126,7 +147,118 @@ def patch_candidate(project_id: str, candidate_id: str, payload: CandidatePatch,
         hook=hook_payload,
     )
     state.repos.projects.touch(project_id)
-    return {"candidate": serialise_candidate(updated)}
+    return {"candidate": state.repos.candidates.get(project_id, candidate_id)}
+
+
+@router.post("/projects/{project_id}/candidates/{candidate_id}/boundary")
+def review_boundary(project_id: str, candidate_id: str, payload: BoundaryAction, request: Request) -> dict:
+    state = get_state(request)
+    source = state.repos.sources.find_optional(project_id)
+    if source is None:
+        raise NotFound("This project has no source video")
+    candidate = state.repos.candidates.get(project_id, candidate_id)
+
+    if payload.action == "accept":
+        if payload.end_ms is None:
+            raise ValidationFailed("Choose an ending before accepting it", code="boundary_end_missing")
+        try:
+            start, end = validate_span(
+                int(candidate["start_ms"]),
+                int(payload.end_ms),
+                int(source["duration_ms"]),
+                min_ms=MIN_CLIP_MS,
+            )
+        except ValueError as exc:
+            raise ValidationFailed(str(exc), code="invalid_span") from exc
+        state.repos.candidates.update(
+            project_id, candidate_id, start_ms=None, end_ms=end, decision=None, title=None, summary=None
+        )
+        updated = state.repos.candidates.set_boundary(
+            project_id, candidate_id, {"reviewed": "accepted", "accepted_end_ms": end}
+        )
+    elif payload.action == "reject":
+        updated = state.repos.candidates.set_boundary(
+            project_id, candidate_id, {"reviewed": "rejected", "accepted_end_ms": None}
+        )
+    else:
+        state.repos.candidates.reset_edits(project_id, candidate_id)
+        updated = state.repos.candidates.set_boundary(
+            project_id, candidate_id, {"reviewed": "pending", "accepted_end_ms": None}
+        )
+    state.repos.projects.touch(project_id)
+    return {"candidate": updated}
+
+
+@router.post("/projects/{project_id}/candidates/{candidate_id}/editorial")
+def re_evaluate_editorial(
+    project_id: str, candidate_id: str, payload: EditorialAction, request: Request
+) -> dict:
+    """Re-plan this candidate without re-transcribing or touching manual edits.
+
+    This is a candidate-level re-evaluation, not a new analysis run. Captions,
+    branding, composition overrides and the user's own trim are preserved.
+    """
+    state = get_state(request)
+    source = state.repos.sources.find_optional(project_id)
+    if source is None:
+        raise NotFound("This project has no source video")
+    candidate = state.repos.candidates.get(project_id, candidate_id)
+    transcript = state.repos.transcripts.latest(project_id)
+    if transcript is None:
+        raise ValidationFailed("Analyse this project before changing its editorial strategy", code="no_transcript")
+    run = state.repos.runs.latest(project_id)
+    brief_data = ((run or {}).get("settings") or {}).get("brief") or {}
+    try:
+        brief = ClippingBrief.model_validate(brief_data) if brief_data else ClippingBrief()
+    except ValueError as exc:
+        raise ValidationFailed("The stored brief is not valid", code="invalid_brief") from exc
+
+    editorial = brief.editorial.model_dump()
+    if payload.strategy == "chronological":
+        editorial["style"] = "chronological"
+        editorial["preferred_strategy"] = "chronological"
+    elif payload.strategy == "manual":
+        editorial["style"] = "manual"
+        editorial["preferred_strategy"] = "manual"
+    elif payload.strategy != "automatic":
+        editorial["style"] = "automatic"
+        editorial["preferred_strategy"] = payload.strategy
+    pacing = brief.pacing.model_dump()
+    if payload.pacing_profile:
+        pacing["profile"] = payload.pacing_profile
+
+    model = build_transcript_model(
+        transcript["segments"], int(source["duration_ms"]), transcript.get("language")
+    )
+    hook = candidate.get("hook_detail") or {}
+    plan = build_retention_plan(
+        model,
+        start_ms=int(candidate["start_ms"]),
+        end_ms=int(candidate["end_ms"]),
+        excerpt=candidate.get("excerpt") or "",
+        pacing=pacing,
+        hook_policy=brief.hook,
+        hook=hook or None,
+        hook_candidates=[hook] if hook else None,
+        editorial=editorial,
+        duration_preset=brief.duration_preset,
+    )
+    stored = plan.model_dump()
+    if not payload.apply and stored.get("editorial"):
+        stored["editorial"]["applied"] = False
+    duration = dict(candidate.get("duration") or {})
+    timeline = (stored.get("timeline") or {})
+    actual = int(timeline.get("total_output_ms") or candidate.get("duration_ms") or 0)
+    record = duration_record(brief.duration_range(), actual)
+    generated = duration.get("generated_ms")
+    duration.update(record)
+    if generated is not None:
+        duration["generated_ms"] = generated
+    updated = state.repos.candidates.set_editorial(
+        project_id, candidate_id, stored, duration=duration
+    )
+    state.repos.projects.touch(project_id)
+    return {"candidate": updated}
 
 
 @router.get("/jobs/{job_id}")

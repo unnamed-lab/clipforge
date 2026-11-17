@@ -1,14 +1,23 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Download, Film, Loader2, Type } from "lucide-react";
+import { ChevronDown, Download, Film, Loader2, Type } from "lucide-react";
 import type { Capabilities, Render } from "@clipforge/shared";
-import { ASPECTS, CAPTION_PRESETS, formatBytes, formatDuration, formatTimecode } from "@clipforge/shared";
+import {
+  ASPECTS,
+  CAPTION_FONTS,
+  CAPTION_PRESETS,
+  COMPOSITION_MODES,
+  formatBytes,
+  formatDuration,
+  formatTimecode,
+} from "@clipforge/shared";
 import { Alert, Badge, EmptyState } from "@/components/ui";
 import { cn } from "@/lib/utils";
 
 type AspectId = (typeof ASPECTS)[number]["id"];
 type CaptionPresetId = (typeof CAPTION_PRESETS)[number]["id"];
+type CompositionModeId = (typeof COMPOSITION_MODES)[number]["id"];
 
 export function RenderPanel({
   projectId,
@@ -31,8 +40,11 @@ export function RenderPanel({
 }) {
   const [aspect, setAspect] = useState<AspectId>("9:16");
   const [resolution, setResolution] = useState<720 | 1080>(1080);
-  const [framing, setFraming] = useState<"crop" | "blur">("crop");
+  const [composition, setComposition] = useState<CompositionModeId>("auto");
+  const [cropX, setCropX] = useState(50);
+  const [cropY, setCropY] = useState(50);
   const [captionPreset, setCaptionPreset] = useState<CaptionPresetId>("clean");
+  const [captionFont, setCaptionFont] = useState<string>("Montserrat");
   const [captions, setCaptions] = useState(true);
   const [normalize, setNormalize] = useState(true);
   const [showPreview, setShowPreview] = useState(false);
@@ -49,9 +61,12 @@ export function RenderPanel({
       await onRender({
         aspect,
         resolution,
-        framing,
+        composition,
+        crop_x_pct: cropX,
+        crop_y_pct: cropY,
         caption_preset: captionPreset,
         captions_enabled: captions,
+        captions: { font_family: captionFont },
         normalize_audio: normalize,
       });
     } catch (caught) {
@@ -109,24 +124,85 @@ export function RenderPanel({
           </div>
           <div className="space-y-1.5">
             <p className="label">How to fill the frame</p>
-            <div className="segmented">
-              <button type="button" data-active={framing === "crop"} onClick={() => setFraming("crop")}>
-                Crop
-              </button>
-              <button type="button" data-active={framing === "blur"} onClick={() => setFraming("blur")}>
-                Blurred background
-              </button>
+            <div className="grid gap-1.5">
+              {COMPOSITION_MODES.map((mode) => (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => setComposition(mode.id)}
+                  aria-pressed={composition === mode.id}
+                  className={cn(
+                    "flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors",
+                    composition === mode.id
+                      ? "border-ember-500/50 bg-ember-500/[0.08]"
+                      : "border-white/8 bg-black/20 hover:border-white/16",
+                    mode.id === "split" && "opacity-60",
+                  )}
+                >
+                  <span className="text-[12.5px] text-mist-200">{mode.label}</span>
+                  <span className="text-right text-[10.5px] text-mist-600">{mode.hint}</span>
+                </button>
+              ))}
             </div>
           </div>
-          <label className="flex items-center gap-2 text-[12.5px] text-mist-300">
-            <input
-              type="checkbox"
-              className="size-3.5 accent-ember-500"
-              checked={normalize}
-              onChange={(event) => setNormalize(event.target.checked)}
-            />
-            Normalise loudness
-          </label>
+          <div className="space-y-1.5">
+            <label className="flex items-center gap-2 text-[12.5px] text-mist-300">
+              <input
+                type="checkbox"
+                className="size-3.5 accent-ember-500"
+                checked={normalize}
+                onChange={(event) => setNormalize(event.target.checked)}
+              />
+              Normalise loudness
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 border-t border-white/6 pt-3 lg:grid-cols-[168px_1fr]">
+        <CompositionPreview aspect={aspect} mode={composition} captionPosition="bottom" />
+        <div className="space-y-2">
+          <p className="label">Layout preview</p>
+          <p className="text-[11.5px] leading-relaxed text-mist-500">
+            {composition === "auto"
+              ? "Scene changes are detected before encoding. Slides, tables and screen recordings are contained; a centred speaker is cropped."
+              : COMPOSITION_MODES.find((mode) => mode.id === composition)?.hint}
+          </p>
+          {composition === "crop" || composition === "manual" ? (
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className="space-y-1 text-[11px] text-mist-500">
+                <span className="flex justify-between">
+                  <span>Crop focus X</span>
+                  <span className="numeric text-mist-300">{Math.round(cropX)}%</span>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={cropX}
+                  onChange={(event) => setCropX(Number(event.target.value))}
+                  className="w-full accent-ember-500"
+                />
+              </label>
+              <label className="space-y-1 text-[11px] text-mist-500">
+                <span className="flex justify-between">
+                  <span>Crop focus Y</span>
+                  <span className="numeric text-mist-300">{Math.round(cropY)}%</span>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={cropY}
+                  onChange={(event) => setCropY(Number(event.target.value))}
+                  className="w-full accent-ember-500"
+                />
+              </label>
+            </div>
+          ) : null}
+          <p className="text-[11px] text-mist-600">
+            Caption guides show the measured safe band, not a guess. The export gate records the real pixel width.
+          </p>
         </div>
       </div>
 
@@ -147,6 +223,21 @@ export function RenderPanel({
           </label>
         </div>
         <div className={cn("grid gap-1.5 sm:grid-cols-2", !captions && "pointer-events-none opacity-45")}>
+          <label className="space-y-1 text-[11px] text-mist-500 sm:col-span-2">
+            <span>Caption face</span>
+            <select
+              className="field h-8 w-full text-[12px]"
+              value={captionFont}
+              onChange={(event) => setCaptionFont(event.target.value)}
+              disabled={!captions}
+            >
+              {CAPTION_FONTS.map((font) => (
+                <option key={font.id} value={font.id}>
+                  {font.label} — {font.note}
+                </option>
+              ))}
+            </select>
+          </label>
           {CAPTION_PRESETS.map((preset) => (
             <button
               key={preset.id}
@@ -232,7 +323,77 @@ export function RenderPanel({
   );
 }
 
+function CompositionPreview({
+  aspect,
+  mode,
+  captionPosition,
+}: {
+  aspect: AspectId;
+  mode: CompositionModeId;
+  captionPosition: "bottom" | "center" | "top";
+}) {
+  const ratio = aspect === "9:16" ? "9 / 16" : aspect === "1:1" ? "1 / 1" : "16 / 9";
+  const contained = mode === "fit" || mode === "split";
+  const pip = mode === "pip";
+  return (
+    <div className="space-y-1.5">
+      <div
+        className="relative overflow-hidden rounded-lg border border-white/10"
+        style={{ aspectRatio: ratio, background: "linear-gradient(145deg,#171b22,#0b0d11)" }}
+        aria-label={`Layout preview: ${mode}`}
+        role="img"
+      >
+        {contained || pip ? (
+          <>
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.14),transparent_60%)] opacity-50 blur-sm" />
+            <div
+              className="absolute rounded-sm border border-white/15 bg-white/[0.06]"
+              style={
+                pip
+                  ? { left: "14%", right: "14%", top: "26%", height: "38%" }
+                  : { left: 0, right: 0, top: "34%", height: "32%" }
+              }
+            >
+              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-500">
+                source
+              </span>
+            </div>
+          </>
+        ) : (
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(255,255,255,0.16),transparent_65%)]">
+            <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-600">
+              filled
+            </span>
+          </div>
+        )}
+        <div
+          className="absolute inset-x-0 border-y border-dashed border-ember-500/40 bg-ember-500/[0.06]"
+          style={
+            captionPosition === "center"
+              ? { top: "45%", height: "12%" }
+              : captionPosition === "top"
+                ? { top: "8%", height: "12%" }
+                : { bottom: "6%", height: "12%" }
+          }
+        >
+          <span className="absolute inset-0 grid place-items-center text-[8px] uppercase tracking-[0.2em] text-ember-300/80">
+            captions
+          </span>
+        </div>
+        <span className="absolute left-1.5 top-1.5 rounded bg-black/55 px-1 py-0.5 text-[8.5px] uppercase tracking-wide text-mist-400">
+          {mode}
+        </span>
+      </div>
+      <p className="text-[10px] leading-snug text-mist-600">
+        Schematic. The worker stores the real scene plan in the render spec.
+      </p>
+    </div>
+  );
+}
+
 function RenderRow({ render }: { render: Render }) {
+  const [open, setOpen] = useState(false);
+  const review = render.review;
   const tone =
     render.status === "completed"
       ? "good"
@@ -241,28 +402,133 @@ function RenderRow({ render }: { render: Render }) {
         : render.status === "cancelled"
           ? "neutral"
           : "ember";
+  const gateStatus = review?.status;
+  const reviewTone = gateStatus === "fail" ? "bad" : gateStatus === "warn" ? "ember" : "good";
 
   return (
-    <li className="flex flex-wrap items-center gap-2 rounded-md border border-white/8 bg-black/20 px-2.5 py-2">
-      <Badge tone={tone} className="h-5 px-2 text-[10.5px]">
-        {render.status}
-      </Badge>
-      <span className="numeric text-[11.5px] text-mist-400">
-        {render.width && render.height ? `${render.width}×${render.height}` : "—"}
-        {render.duration_ms ? ` · ${formatTimecode(render.duration_ms)}` : ""}
-        {render.size_bytes ? ` · ${formatBytes(render.size_bytes)}` : ""}
-      </span>
-      {render.status === "failed" && render.error_message ? (
-        <span className="w-full text-[11.5px] text-signal-bad/90">{render.error_message}</span>
-      ) : null}
-      <div className="ml-auto flex items-center gap-1.5">
-        {render.status === "completed" ? (
-          <a className="btn btn-sm h-6 px-2 text-[11px]" href={`/api/renders/${render.id}/download`}>
-            <Download className="size-3" strokeWidth={2} />
-            MP4
-          </a>
+    <li className="rounded-md border border-white/8 bg-black/20 px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={tone} className="h-5 px-2 text-[10.5px]">
+          {render.status}
+        </Badge>
+        {gateStatus ? (
+          <Badge tone={reviewTone} className="h-5 px-2 text-[10.5px]">
+            gate {gateStatus}
+          </Badge>
         ) : null}
+        <span className="numeric text-[11.5px] text-mist-400">
+          {render.width && render.height ? `${render.width}×${render.height}` : "—"}
+          {render.duration_ms ? ` · ${formatTimecode(render.duration_ms)}` : ""}
+          {render.size_bytes ? ` · ${formatBytes(render.size_bytes)}` : ""}
+        </span>
+        {render.status === "failed" && render.error_message ? (
+          <span className="w-full text-[11.5px] text-signal-bad/90">{render.error_message}</span>
+        ) : null}
+        <div className="ml-auto flex items-center gap-1.5">
+          {review?.checks?.length ? (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm h-6 px-1.5 text-[11px]"
+              onClick={() => setOpen((value) => !value)}
+              aria-expanded={open}
+            >
+              Review
+              <ChevronDown className={cn("size-3 transition-transform", open && "rotate-180")} strokeWidth={2} />
+            </button>
+          ) : null}
+          {render.status === "completed" ? (
+            <a className="btn btn-sm h-6 px-2 text-[11px]" href={`/api/renders/${render.id}/download`}>
+              <Download className="size-3" strokeWidth={2} />
+              MP4
+            </a>
+          ) : null}
+          {review?.draft_relative_path ? (
+            <a className="btn btn-ghost btn-sm h-6 px-2 text-[11px]" href={`/api/renders/${render.id}/draft`}>
+              <Download className="size-3" strokeWidth={2} />
+              Draft
+            </a>
+          ) : null}
+        </div>
       </div>
+
+      {open && review ? (
+        <div className="mt-2 space-y-2 border-t border-white/6 pt-2">
+          <p className="text-[11.5px] text-mist-300">{review.summary}</p>
+          <ul className="space-y-1">
+            {review.checks.map((check) => (
+              <li key={check.id} className="flex gap-2 text-[11.5px] leading-snug">
+                <Badge
+                  tone={check.status === "fail" ? "bad" : check.status === "warn" ? "ember" : "neutral"}
+                  className="mt-0.5 h-4 shrink-0 px-1.5 text-[9.5px]"
+                >
+                  {check.status}
+                </Badge>
+                <span className="text-mist-400">
+                  <span className="text-mist-200">{check.label}:</span> {check.detail}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <EditDecisionList edl={review.edl} />
+          <CaptionMeasurements review={review} />
+        </div>
+      ) : null}
     </li>
+  );
+}
+
+function EditDecisionList({ edl }: { edl?: Record<string, unknown> }) {
+  const segments = Array.isArray(edl?.segments) ? (edl.segments as Array<Record<string, unknown>>) : [];
+  if (segments.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <p className="label">Source → output</p>
+      <div className="max-h-40 overflow-y-auto rounded border border-white/6">
+        <table className="w-full border-collapse text-[10.5px]">
+          <thead className="sticky top-0 bg-ink-900 text-mist-500">
+            <tr>
+              <th className="px-1.5 py-1 text-left font-medium">#</th>
+              <th className="px-1.5 py-1 text-left font-medium">Source</th>
+              <th className="px-1.5 py-1 text-left font-medium">Output</th>
+              <th className="px-1.5 py-1 text-left font-medium">Layout</th>
+            </tr>
+          </thead>
+          <tbody className="numeric text-mist-400">
+            {segments.map((segment, index) => {
+              const composition = segment.composition as Record<string, unknown> | null | undefined;
+              return (
+                <tr key={index} className="border-t border-white/5">
+                  <td className="px-1.5 py-0.5">{index + 1}</td>
+                  <td className="px-1.5 py-0.5">
+                    {formatTimecode(Number(segment.source_start_ms ?? 0))} –{" "}
+                    {formatTimecode(Number(segment.source_end_ms ?? 0))}
+                  </td>
+                  <td className="px-1.5 py-0.5">
+                    {formatTimecode(Number(segment.output_start_ms ?? 0))} –{" "}
+                    {formatTimecode(Number(segment.output_end_ms ?? 0))}
+                  </td>
+                  <td className="px-1.5 py-0.5">{String(composition?.mode ?? "legacy")}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CaptionMeasurements({ review }: { review: NonNullable<Render["review"]> }) {
+  const check = review.checks.find((entry) => entry.id === "captions");
+  const report = (check as Record<string, unknown> | undefined)?.report as Record<string, unknown> | undefined;
+  if (!report || !report.used) return null;
+  const width = Number(report.max_line_width_px ?? 0);
+  const limit = Number(report.max_line_width_limit_px ?? 0);
+  return (
+    <p className="numeric text-[10.5px] text-mist-500">
+      Captions: widest measured line {width.toFixed(0)}px
+      {limit ? ` of ${limit.toFixed(0)}px safe width` : ""} · {String(report.chunks ?? 0)} chunks ·{" "}
+      {report.bounds_ok ? "inside the safe band" : "outside the safe band"}
+    </p>
   );
 }

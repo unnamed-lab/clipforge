@@ -16,6 +16,7 @@ from clipforge.media.waveform import render_waveform
 from clipforge.pipeline.briefing import (
     apply_brief,
     apply_corrections,
+    attach_editorial,
     attach_hooks,
     persist_brief,
     resolve_brief,
@@ -25,6 +26,7 @@ from clipforge.providers.llm.openai_compat import build_llm_provider
 from clipforge.providers.llm.base import ScorableClip
 from clipforge.providers.transcription.base import TranscriptionOptions
 from clipforge.providers.transcription.faster_whisper import SUPPORTED_MODELS, FasterWhisperTranscription
+from clipforge.quality.boundaries import review_ending
 from clipforge.ranking.dedupe import select_candidates
 from clipforge.ranking.generate import DURATION_BANDS, generate_candidates
 from clipforge.ranking.score import score_candidates, weights_for
@@ -197,7 +199,7 @@ def run_analysis(
     if not model.sentences:
         raise JobFailed("no_speech_detected", "The transcript has no usable sentences to build clips from.")
 
-    bands = brief.duration_bands()
+    bands = brief.generation_bands()
     if band_choice in {"short", "medium", "long"}:
         explicit = tuple(band for band in DURATION_BANDS if band[2] == band_choice)
         if explicit:
@@ -210,7 +212,14 @@ def run_analysis(
         )
 
     on_stage("rank", 72, "Scoring candidates against the brief")
-    ranked = score_candidates(drafts, model, goal=goal, weight_overrides=request.get("weights") or None)
+    duration_range = brief.duration_range()
+    ranked = score_candidates(
+        drafts,
+        model,
+        goal=goal,
+        weight_overrides=request.get("weights") or None,
+        duration_range=duration_range,
+    )
     ranked, blocked = apply_brief(ranked, brief)
     if not ranked:
         raise JobFailed(
@@ -296,10 +305,48 @@ def run_analysis(
     if blocked:
         warnings.append(f"{blocked} candidate(s) were excluded by the brief's exclusions or safety rules.")
     warnings.extend(attach_hooks(selection.kept, model, brief))
+    warnings.extend(attach_editorial(selection.kept, model, brief))
 
+    fitting = [candidate for candidate in selection.kept if (candidate.duration or {}).get("status") == "fit"]
+    if not fitting:
+        closest = sorted(
+            selection.kept,
+            key=lambda candidate: abs(candidate.duration_ms - (
+                duration_range.target_ms or (duration_range.min_ms + duration_range.max_ms) // 2
+            )),
+        )[:3]
+        alternatives = "; ".join(
+            f"{candidate.title} ({candidate.duration_ms / 1000:.0f}s, "
+            f"{(candidate.duration or {}).get('status', 'unknown')})"
+            for candidate in closest
+        )
+        warnings.append(
+            f"No complete moment fits the {duration_range.label} target. "
+            f"Closest coherent alternatives: {alternatives}. Nothing was padded or truncated."
+        )
+
+    on_stage("boundaries", 94, "Reviewing clip endings")
     now_payload = []
     for candidate in selection.kept:
         hook_detail = candidate.hook_detail or {}
+        try:
+            boundary = review_ending(
+                candidate_start_ms=candidate.start_ms,
+                candidate_end_ms=candidate.end_ms,
+                sentences=model.sentences,
+                source_path=source_path,
+                source_duration_ms=int(source["duration_ms"]),
+                cache_dir=paths / "analysis" / "scenes",
+            )
+        except Exception as exc:  # ending review must never break analysis
+            logger.warning("Ending review failed for %s: %s", candidate.draft.key, exc)
+            boundary = {
+                "version": 1,
+                "suspicious": False,
+                "reviewed": "pending",
+                "evidence": ["Ending review could not run."],
+                "alternatives": [],
+            }
         now_payload.append(
             {
                 "id": new_id(),
@@ -318,7 +365,17 @@ def run_analysis(
                 "warnings": candidate.warnings,
                 "method": candidate.method,
                 "method_version": candidate.method_version,
+                "boundary": boundary,
+                "editorial": candidate.editorial,
+                "duration": candidate.duration,
             }
+        )
+
+    suspicious = [candidate for candidate in now_payload if (candidate.get("boundary") or {}).get("suspicious")]
+    if suspicious:
+        warnings.append(
+            f"{len(suspicious)} ending(s) may include a trailing or unrelated shot. "
+            "Check the ending review before exporting."
         )
 
     repos.candidates.replace_for_run(project_id, run_id, now_payload)

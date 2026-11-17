@@ -93,6 +93,105 @@ export const candidateScoresSchema = z
   .passthrough();
 export type CandidateScores = z.infer<typeof candidateScoresSchema>;
 
+export const candidateBoundarySchema = z
+  .object({
+    version: z.number().optional(),
+    suspicious: z.boolean().default(false),
+    reviewed: z.enum(["pending", "accepted", "rejected"]).default("pending"),
+    suspicion: z.number().optional(),
+    start_ms: z.number().optional(),
+    end_ms: z.number().optional(),
+    accepted_end_ms: z.number().nullable().optional(),
+    current_sentence: z.string().nullable().optional(),
+    next_sentence: z.string().nullable().optional(),
+    last_sentence_ends_with_terminator: z.boolean().optional(),
+    nearest_cut_before_ms: z.number().nullable().optional(),
+    nearest_cut_after_ms: z.number().nullable().optional(),
+    evidence: z.array(z.string()).default([]),
+    alternatives: z
+      .array(
+        z.object({
+          end_ms: z.number(),
+          label: z.string(),
+          reason: z.string(),
+          confidence: z.number(),
+          source: z.string(),
+        }),
+      )
+      .default([]),
+  })
+  .passthrough();
+export type CandidateBoundary = z.infer<typeof candidateBoundarySchema>;
+
+export const candidateDurationSchema = z
+  .object({
+    preset: z.enum(["short", "standard", "extended", "custom"]).optional(),
+    label: z.string().optional(),
+    min_ms: z.number().optional(),
+    max_ms: z.number().optional(),
+    target_ms: z.number().optional(),
+    actual_ms: z.number().optional(),
+    status: z.enum(["fit", "near", "too_short", "too_long", "unknown"]).optional(),
+    reason: z.string().optional(),
+    proximity: z.number().optional(),
+  })
+  .passthrough();
+export type CandidateDuration = z.infer<typeof candidateDurationSchema>;
+
+export const editorialAlternativeSchema = z
+  .object({
+    id: z.string(),
+    label: z.string(),
+    strategy: z.string(),
+    description: z.string().default(""),
+    available: z.boolean().default(true),
+    confidence: z.number().default(0),
+    estimated_duration_ms: z.number().default(0),
+    pacing_profile: z.string().nullable().optional(),
+    reason: z.string().default(""),
+    requires_approval: z.boolean().default(false),
+  })
+  .passthrough();
+
+export const editorialDecisionSchema = z
+  .object({
+    version: z.number().optional(),
+    strategy: z.string().default("chronological"),
+    label: z.string().default("Chronological"),
+    style: z.string().default("automatic"),
+    rationale: z.string().default(""),
+    confidence: z.number().default(0),
+    alternatives: z.array(editorialAlternativeSchema).default([]),
+    concerns: z.array(z.string()).default([]),
+    review_required: z.boolean().default(false),
+    reordered: z.boolean().default(false),
+    applied: z.boolean().default(false),
+    fallback: z.string().default(""),
+    pacing_profile: z.string().default("balanced"),
+    timeline: z.record(z.string(), z.unknown()).nullable().optional(),
+  })
+  .passthrough();
+export type EditorialDecision = z.infer<typeof editorialDecisionSchema>;
+
+export const candidateEditorialSchema = z
+  .object({
+    version: z.number().optional(),
+    profile: z.string().optional(),
+    strategy: z.string().optional(),
+    rationale: z.string().optional(),
+    confidence: z.number().optional(),
+    context_loss: z.number().optional(),
+    review_required: z.boolean().optional(),
+    warnings: z.array(z.string()).default([]),
+    reordered: z.boolean().optional(),
+    segments: z.array(z.record(z.string(), z.unknown())).default([]),
+    alternatives: z.array(editorialAlternativeSchema).default([]),
+    timeline: z.record(z.string(), z.unknown()).optional(),
+    editorial: editorialDecisionSchema.optional(),
+  })
+  .passthrough();
+export type CandidateEditorial = z.infer<typeof candidateEditorialSchema>;
+
 export const candidateSchema = z
   .object({
     id: z.string(),
@@ -117,11 +216,40 @@ export const candidateSchema = z
     user_end_ms: z.number().nullable(),
     duplicate_of: z.string().nullable().optional(),
     edited: z.boolean(),
+    boundary: candidateBoundarySchema.optional(),
+    duration: candidateDurationSchema.optional(),
+    editorial: candidateEditorialSchema.optional(),
     created_at: z.string(),
     updated_at: z.string(),
   })
   .passthrough();
 export type Candidate = z.infer<typeof candidateSchema>;
+
+export const reviewSchema = z
+  .object({
+    version: z.number().optional(),
+    status: z.enum(["pass", "warn", "fail"]).optional(),
+    blocking: z.boolean().optional(),
+    summary: z.string().optional(),
+    checks: z
+      .array(
+        z
+          .object({
+            id: z.string(),
+            label: z.string(),
+            status: z.enum(["pass", "warn", "fail"]),
+            detail: z.string(),
+          })
+          .passthrough(),
+      )
+      .default([]),
+    edl: z.record(z.string(), z.unknown()).optional(),
+    output: z.record(z.string(), z.unknown()).optional(),
+    draft_relative_path: z.string().optional(),
+    draft_error: z.string().optional(),
+  })
+  .passthrough();
+export type Review = z.infer<typeof reviewSchema>;
 
 export const renderSchema = z
   .object({
@@ -138,6 +266,7 @@ export const renderSchema = z
     error_code: z.string().nullable(),
     error_message: z.string().nullable(),
     download_url: z.string().nullable(),
+    review: reviewSchema.default({ checks: [] }),
     created_at: z.string(),
     finished_at: z.string().nullable(),
   })
@@ -245,12 +374,21 @@ export const capabilitiesSchema = z
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
 
 /** Render request body accepted by POST /api/projects/{id}/renders. */
+export const compositionModeSchema = z.enum(["auto", "crop", "fit", "pip", "split", "manual"]);
+export type CompositionMode = z.infer<typeof compositionModeSchema>;
+
 export const renderRequestSchema = z.object({
   candidate_id: z.string().optional(),
-  segments: z.array(z.object({ start_ms: z.number(), end_ms: z.number() })).optional(),
+  segments: z
+    .array(z.object({ start_ms: z.number(), end_ms: z.number(), composition: z.record(z.string(), z.unknown()).optional() }))
+    .optional(),
   aspect: z.enum(["9:16", "16:9", "1:1"]),
   resolution: z.union([z.literal(720), z.literal(1080)]),
   framing: z.enum(["crop", "blur"]),
+  composition: compositionModeSchema.default("auto"),
+  composition_overrides: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+  crop_x_pct: z.number().min(0).max(100).optional(),
+  crop_y_pct: z.number().min(0).max(100).optional(),
   caption_preset: z.enum(["clean", "large", "minimal", "branded", "custom"]),
   captions_enabled: z.boolean(),
   captions: z
@@ -260,12 +398,17 @@ export const renderRequestSchema = z.object({
       bold: z.boolean(),
       position: z.enum(["bottom", "center", "top"]),
       margin_v: z.number(),
+      margin_h: z.number(),
+      max_line_width_pct: z.number(),
+      min_font_scale: z.number(),
+      avoid_visual_overlap: z.boolean(),
       primary_color: z.string(),
       highlight_color: z.string(),
       outline_color: z.string(),
       outline_width: z.number(),
       uppercase: z.boolean(),
       max_words_per_line: z.number(),
+      max_chars_per_line: z.number(),
       max_lines: z.number(),
       background: z.boolean(),
     })

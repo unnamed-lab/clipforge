@@ -135,6 +135,38 @@ export function ProjectWorkspace({
     await refresh();
   }
 
+  async function reviewBoundary(
+    candidateId: string,
+    action: { action: "accept" | "reject" | "reset"; end_ms?: number },
+  ) {
+    const response = await apiJson<{ candidate: Candidate }>(
+      `/api/projects/${projectId}/candidates/${candidateId}/boundary`,
+      { method: "POST", body: action },
+    );
+    setDetail((current) => ({
+      ...current,
+      candidates: current.candidates.map((candidate) =>
+        candidate.id === response.candidate.id ? response.candidate : candidate,
+      ),
+    }));
+  }
+
+  async function reEvaluateEditorial(
+    candidateId: string,
+    action: { strategy: string; pacing_profile?: string; apply?: boolean },
+  ) {
+    const response = await apiJson<{ candidate: Candidate }>(
+      `/api/projects/${projectId}/candidates/${candidateId}/editorial`,
+      { method: "POST", body: action },
+    );
+    setDetail((current) => ({
+      ...current,
+      candidates: current.candidates.map((candidate) =>
+        candidate.id === response.candidate.id ? response.candidate : candidate,
+      ),
+    }));
+  }
+
   async function renameProject(name: string) {
     const trimmed = name.trim();
     if (!trimmed || trimmed === detail.project.name) return;
@@ -306,6 +338,8 @@ export function ProjectWorkspace({
                 hasWaveform={hasWaveform}
                 renders={detail.renders}
                 onPatch={patchCandidate}
+                onBoundary={reviewBoundary}
+                onEditorial={reEvaluateEditorial}
                 onRender={renderClip}
                 renderBusy={renderRunning}
               />

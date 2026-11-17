@@ -14,9 +14,14 @@ from clipforge.db.repositories import Repositories
 from clipforge.errors import AppError, JobFailed
 from clipforge.media.process import ProcessCancelled
 from clipforge.media.probe import probe
+from clipforge.quality.boundaries import review_ending
+from clipforge.quality.gate import run_export_gate
+from clipforge.ranking.sentences import build_transcript_model
+from clipforge.rendering.composition import expand_composition
 from clipforge.rendering.ffmpeg import build_command, execute
+from clipforge.rendering.fonts import copy_fonts, resolve_font
 from clipforge.rendering.spec import RenderSpec
-from clipforge.rendering.subtitles import build_ass, build_srt
+from clipforge.rendering.subtitles import build_captions
 from clipforge.storage.base import StorageBackend, StorageObjectMissing, ensure_local
 from clipforge.storage.workspace import clear_tmp, ensure_layout, ensure_space
 
@@ -27,7 +32,7 @@ SIDECAR_FILENAME = "captions.srt"
 OUTPUT_FILENAME = "out.mp4"
 LOGO_FILENAME = "logo.png"
 MUSIC_FILENAME = "music"
-DURATION_TOLERANCE_MS = 2_500
+FONTS_DIR = "fonts"
 
 StageCallback = Callable[[str, float, str], None]
 
@@ -41,9 +46,21 @@ def _words_for_spans(segments: list[dict], spans: list[tuple[int, int]]) -> list
         else:
             flat.append({"start_ms": segment.get("start_ms", 0), "end_ms": segment.get("end_ms", 0),
                          "word": segment.get("text", "")})
-    result: list[list[dict]] = []
-    for start, end in spans:
-        result.append([w for w in flat if int(w.get("end_ms", 0)) > start and int(w.get("start_ms", 0)) < end])
+    result: list[list[dict]] = [[] for _ in spans]
+    for word in flat:
+        word_start = int(word.get("start_ms", 0))
+        word_end = int(word.get("end_ms", word_start))
+        best_index = None
+        best_overlap = 0
+        for index, (start, end) in enumerate(spans):
+            overlap = min(end, word_end) - max(start, word_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_index = index
+        if best_index is not None:
+            # A word belongs to exactly one output span even when a scene cut
+            # splits a sentence. Duplicating it would repeat captions and audio.
+            result[best_index].append(word)
     return result
 
 
@@ -74,6 +91,42 @@ def _policy_checks(spec: RenderSpec) -> None:
             "audio_replacement_not_permitted",
             "This profile does not permit replacing the original audio.",
         )
+
+
+def _ending_review_for_render(
+    repos: Repositories,
+    *,
+    project_id: str,
+    candidate_id: str | None,
+    source: dict,
+    source_path: Path,
+    cache_dir: Path,
+) -> dict | None:
+    if not candidate_id:
+        return None
+    try:
+        candidate = repos.candidates.get(project_id, candidate_id)
+    except AppError:
+        return None
+    boundary = candidate.get("boundary") or {}
+    if boundary.get("evidence"):
+        return boundary
+    transcript = repos.transcripts.latest(project_id)
+    if transcript is None:
+        return boundary or None
+    model = build_transcript_model(
+        transcript["segments"], int(source["duration_ms"]), transcript.get("language")
+    )
+    review = review_ending(
+        candidate_start_ms=int(candidate["start_ms"]),
+        candidate_end_ms=int(candidate["end_ms"]),
+        sentences=model.sentences,
+        source_path=source_path,
+        source_duration_ms=int(source["duration_ms"]),
+        cache_dir=cache_dir,
+    )
+    repos.candidates.set_boundary(project_id, candidate_id, review)
+    return review
 
 
 def _asset_path(storage: StorageBackend, asset: dict) -> Path | None:
@@ -168,12 +221,41 @@ def perform_render(
         raise JobFailed("source_missing", exc.message) from exc
 
     ensure_space(settings, paths, required_bytes=400 * 1024 * 1024)
+    logo_requested = bool(spec.logo.enabled)
     on_stage("assets", 2, "Checking brand assets and audio policy")
     warnings = _prepare_assets(spec, repos, storage, work)
+    overlay_report = {
+        "requested": logo_requested,
+        "applied": bool(spec.logo.enabled and spec.logo.asset_name == LOGO_FILENAME),
+        "asset": spec.logo.asset_id,
+        "reason": None if logo_requested == bool(spec.logo.enabled) else
+        next((warning for warning in warnings if "logo" in warning.lower()), "The logo was skipped."),
+    }
+
+    on_stage("compose", 2.5, "Planning the layout from scene changes")
+    plan = expand_composition(
+        spec,
+        source_path,
+        source.get("width"),
+        source.get("height"),
+        source_duration_ms=int(source["duration_ms"]),
+        cache_dir=paths / "analysis" / "scenes",
+        on_progress=lambda index, total: on_stage(
+            "compose",
+            2.5 + (index / max(1, total)) * 1.5,
+            f"Planning layout for scene {min(index + 1, total)} of {total}",
+        ),
+    )
+    spec.segments = plan.segments
+    repos.renders.update_spec(render_id, spec.model_dump())
+    warnings.extend(plan.warnings)
+    warnings = list(dict.fromkeys(warnings))
 
     spans = [(segment.start_ms, segment.end_ms) for segment in spec.segments]
+    compositions = [segment.composition for segment in spec.segments]
     captions_name: str | None = None
     sidecar_text: str | None = None
+    caption_report: dict | None = None
 
     if spec.captions.enabled:
         transcript = repos.transcripts.latest(project_id)
@@ -183,16 +265,22 @@ def perform_render(
             words = _words_for_spans(transcript["segments"], spans)
             if any(words):
                 width, height = spec.video.dimensions
+                captions = build_captions(spans, words, spec, width, height, compositions)
+                caption_report = captions.report.to_dict()
+                warnings.extend(captions.report.warnings)
                 if spec.captions.export_sidecar:
-                    sidecar_text = build_srt(spans, words)
+                    sidecar_text = captions.srt
                 if spec.captions.burn_in:
-                    ass = build_ass(spans, words, spec, width, height)
-                    (work / CAPTIONS_FILENAME).write_text(ass, encoding="utf-8")
+                    (work / CAPTIONS_FILENAME).write_text(captions.ass, encoding="utf-8")
                     captions_name = CAPTIONS_FILENAME
+                    copy_fonts(work / FONTS_DIR, resolve_font(
+                        spec.captions.font_family, weight=spec.captions.weight, bold=spec.captions.bold
+                    ))
             else:
                 warnings.append("Captions were requested but this span has no word timings.")
 
-    on_stage("rendering", 4, "Encoding video")
+    warnings = list(dict.fromkeys(warnings))
+    on_stage("rendering", 5, "Encoding video")
     command = build_command(
         spec,
         source=source_path,
@@ -201,10 +289,12 @@ def perform_render(
         source_fps=source["fps"],
         captions_name=captions_name,
         output_name=OUTPUT_FILENAME,
+        source_width=source.get("width"),
+        source_height=source.get("height"),
     )
 
     def handle_progress(percent: float) -> None:
-        on_stage("rendering", 4 + percent * 0.9, "Encoding video")
+        on_stage("rendering", 5 + percent * 0.89, "Encoding video")
 
     try:
         outcome = execute(command, cancel=cancel_event, on_progress=handle_progress, timeout_seconds=2400)
@@ -228,14 +318,42 @@ def perform_render(
     except AppError as exc:
         raise JobFailed("render_invalid", "The rendered file could not be read back.") from exc
 
-    expected = spec.total_duration_ms
-    if abs(info.duration_ms - expected) > max(DURATION_TOLERANCE_MS, expected * 0.05):
+    on_stage("validating", 96, "Running the export quality gate")
+    ending_review = _ending_review_for_render(
+        repos,
+        project_id=project_id,
+        candidate_id=render.get("candidate_id"),
+        source=source,
+        source_path=source_path,
+        cache_dir=paths / "analysis" / "scenes",
+    )
+    gate = run_export_gate(
+        output_path=output,
+        spec=spec,
+        source=source,
+        caption_report=caption_report,
+        overlay_report=overlay_report,
+        ending_review=ending_review,
+        info=info,
+    )
+    if gate["blocking"]:
+        # Keep the encoded draft and its review evidence. The draft is never
+        # advertised as a finished render, but it can be downloaded for review.
+        draft_key = f"projects/{project_id}/renders/{render_id}.draft.mp4"
+        try:
+            storage.put_file(draft_key, output, content_type="video/mp4")
+            gate["draft_relative_path"] = draft_key
+        except Exception as exc:
+            logger.warning("Could not preserve the blocked render draft: %s", exc)
+            gate["draft_error"] = "The draft could not be copied into durable storage."
+        repos.renders.set_review(render_id, gate)
         raise JobFailed(
-            "render_duration_mismatch",
-            f"The rendered clip is {info.duration_ms // 1000}s but {expected // 1000}s was expected.",
+            "export_gate_failed",
+            gate["summary"] + " The draft was kept so you can review the evidence and retry.",
         )
-    if not info.has_audio:
-        raise JobFailed("render_no_audio", "The rendered file has no audio track.")
+    repos.renders.set_review(render_id, gate)
+    if gate["status"] == "warn":
+        warnings.append(gate["summary"])
 
     final_key = f"projects/{project_id}/renders/{render_id}.mp4"
     subtitle_key = f"projects/{project_id}/renders/{render_id}.srt" if sidecar_text else None
@@ -276,5 +394,6 @@ def perform_render(
         "size_bytes": size_bytes,
         "subtitle_path": subtitle_key,
         "warnings": warnings,
+        "review": gate,
         "encode_seconds": round(outcome.duration_seconds, 1),
     }

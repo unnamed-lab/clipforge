@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from clipforge import __version__
 from clipforge.api.deps import get_state
 from clipforge.media.process import which
+from clipforge.platforms import platform_summary, safe_area_for
 from clipforge.providers.diarisation.base import UnavailableDiarisation
 from clipforge.providers.transcription.faster_whisper import MODEL_SIZES_MB, SUPPORTED_MODELS, FasterWhisperTranscription
 from clipforge.storage.workspace import free_bytes
@@ -45,6 +46,17 @@ def health() -> dict:
         "version": __version__,
         "uptime_seconds": int(time.time() - STARTED_AT),
     }
+
+
+@router.get("/platforms")
+def platforms() -> dict:
+    """Central platform constraints, separate from editorial duration targets."""
+    return platform_summary()
+
+
+@router.get("/platforms/{platform}/safe-area")
+def platform_safe_area(platform: str, aspect: str = "9:16") -> dict:
+    return {"platform": platform, "aspect": aspect, "caption_safe_area": safe_area_for(platform, aspect)}
 
 
 @router.get("/capabilities")
@@ -96,6 +108,7 @@ def capabilities(request: Request) -> dict:
             "max_upload_bytes": settings.max_upload_bytes,
             "max_duration_ms": settings.max_duration_ms,
         },
+        "platforms": platform_summary(),
         "platform": {
             "os": platform.system(),
             "release": platform.release(),

@@ -1,6 +1,8 @@
-# syntax=docker/dockerfile:1.7
 # Next.js standalone image. Build context is the repository root because the web
 # app depends on the workspace package @clipforge/shared.
+#
+# Uses the builder's built-in Dockerfile frontend; it needs only features that
+# have been stable since Dockerfile 1.2.
 
 FROM node:22.14.0-bookworm-slim AS base
 ENV NEXT_TELEMETRY_DISABLED=1

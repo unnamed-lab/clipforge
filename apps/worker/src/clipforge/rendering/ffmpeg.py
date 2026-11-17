@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from clipforge.media.process import ProcessCancelled, ProcessFailed, ProcessTimeout, require, run
-from clipforge.rendering.spec import RenderSpec
+from clipforge.rendering.spec import CompositionDecision, Rect, RenderSpec, SegmentSpan
 
 X264_PRESET = "veryfast"
 CRF = 20
@@ -43,18 +43,132 @@ def _fps(spec: RenderSpec, source_fps: float | None) -> int:
     return 30
 
 
-def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
-                   output_label: str) -> str:
-    if spec.video.framing == "blur":
+def _even(value: float) -> int:
+    rounded = max(2, int(round(value)))
+    return rounded + (rounded % 2)
+
+
+def _fit_rect(source_aspect: float, target_aspect: float, margin: float) -> Rect:
+    margin = max(0.0, min(0.20, margin))
+    if source_aspect <= 0 or target_aspect <= 0:
+        return Rect(x_pct=margin, y_pct=margin, width_pct=1 - 2 * margin, height_pct=1 - 2 * margin)
+    if source_aspect > target_aspect:
+        width = 1.0 - 2 * margin
+        height = width * target_aspect / source_aspect
+        return Rect(x_pct=margin, y_pct=(1.0 - height) / 2, width_pct=width, height_pct=height)
+    height = 1.0 - 2 * margin
+    width = height * source_aspect / target_aspect
+    return Rect(x_pct=(1.0 - width) / 2, y_pct=margin, width_pct=width, height_pct=height)
+
+
+def _foreground_rect(decision: CompositionDecision, source_aspect: float, target_aspect: float) -> Rect:
+    return decision.foreground or _fit_rect(source_aspect, target_aspect, decision.fit_margin_pct)
+
+
+def _composition_chain(
+    decision: CompositionDecision,
+    *,
+    width: int,
+    height: int,
+    source_aspect: float,
+    target_aspect: float,
+    input_label: str,
+    output_label: str,
+) -> str:
+    uid = output_label
+    mode = decision.mode
+    if mode == "split":
+        # Split/stacked needs two simultaneous sources. A single-source segment
+        # must never pretend to show two; contain it instead.
+        mode = "fit"
+    if mode in {"fit", "manual"} and decision.foreground is not None:
+        mode = "fit"
+    elif mode == "manual":
+        mode = "crop"
+
+    if mode == "crop":
+        x = max(0.0, min(1.0, decision.crop_x_pct / 100))
+        y = max(0.0, min(1.0, decision.crop_y_pct / 100))
         chain = (
-            f"{input_label}split=2[bgsrc][fgsrc];"
-            f"[bgsrc]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"{input_label}scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height}:(iw-ow)*{x:.4f}:(ih-oh)*{y:.4f},setsar=1"
+        )
+        return chain + f"[{output_label}]"
+
+    if mode == "pip":
+        pip_width = _even(width * decision.pip_scale_pct / 100)
+        pip_height = _even(height * decision.pip_scale_pct / 100)
+        margin = max(0, int(decision.pip_margin_px))
+        if decision.pip_position == "top":
+            y = str(margin)
+        elif decision.pip_position == "bottom":
+            y = f"H-h-{margin}"
+        else:
+            y = "(H-h)/2"
+        chain = (
+            f"{input_label}split=2[bgsrc_{uid}][fgsrc_{uid}];"
+            f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.08:saturation=0.85,"
-            f"setsar=1[bgblur];"
-            f"[fgsrc]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"setsar=1[fgfit];"
-            f"[bgblur][fgfit]overlay=(W-w)/2:(H-h)/2[composed];"
-            f"[composed]setsar=1"
+            f"setsar=1[bg_{uid}];"
+            f"[fgsrc_{uid}]scale={pip_width}:{pip_height}:force_original_aspect_ratio=decrease,"
+            f"setsar=1[fg_{uid}];"
+            f"[bg_{uid}][fg_{uid}]overlay=(W-w)/2:{y}:shortest=1[composed_{uid}];"
+            f"[composed_{uid}]setsar=1"
+        )
+        return chain + f"[{output_label}]"
+
+    rect = _foreground_rect(decision, source_aspect, target_aspect)
+    fg_width = min(width - 2, _even(rect.width_pct * width))
+    fg_height = min(height - 2, _even(rect.height_pct * height))
+    x = max(0, min(width - fg_width, int(round(rect.x_pct * width))))
+    y = max(0, min(height - fg_height, int(round(rect.y_pct * height))))
+    if decision.background in {"solid", "none"}:
+        background_color = decision.background_color if decision.background == "solid" else "#000000"
+        chain = (
+            f"color=c={background_color}:s={width}x{height}:r=30[bg_{uid}];"
+            f"{input_label}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
+            f"setsar=1[fg_{uid}];"
+            f"[bg_{uid}][fg_{uid}]overlay={x}:{y}:shortest=1[composed_{uid}];"
+            f"[composed_{uid}]setsar=1"
+        )
+        return chain + f"[{output_label}]"
+
+    chain = (
+        f"{input_label}split=2[bgsrc_{uid}][fgsrc_{uid}];"
+        f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.08:saturation=0.85,"
+        f"setsar=1[bg_{uid}];"
+        f"[fgsrc_{uid}]scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
+        f"setsar=1[fg_{uid}];"
+        f"[bg_{uid}][fg_{uid}]overlay={x}:{y}[composed_{uid}];"
+        f"[composed_{uid}]setsar=1"
+    )
+    return chain + f"[{output_label}]"
+
+
+def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
+                   output_label: str, segment: SegmentSpan, source_aspect: float) -> str:
+    if segment.composition is not None:
+        return _composition_chain(
+            segment.composition,
+            width=width,
+            height=height,
+            source_aspect=source_aspect,
+            target_aspect=width / height,
+            input_label=input_label,
+            output_label=output_label,
+        )
+    if spec.video.framing == "blur":
+        uid = output_label
+        chain = (
+            f"{input_label}split=2[bgsrc_{uid}][fgsrc_{uid}];"
+            f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.08:saturation=0.85,"
+            f"setsar=1[bgblur_{uid}];"
+            f"[fgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"setsar=1[fgfit_{uid}];"
+            f"[bgblur_{uid}][fgfit_{uid}]overlay=(W-w)/2:(H-h)/2[composed_{uid}];"
+            f"[composed_{uid}]setsar=1"
         )
     else:
         chain = (
@@ -157,12 +271,15 @@ def build_command(
     source_fps: float | None,
     captions_name: str | None,
     output_name: str = "out.mp4",
+    source_width: int | None = None,
+    source_height: int | None = None,
 ) -> RenderCommand:
     ffmpeg = require("ffmpeg")
     width, height = spec.video.dimensions
     fps = _fps(spec, source_fps)
     total_ms = spec.total_duration_ms
     segment_count = len(spec.segments)
+    source_aspect = (source_width or 1920) / max(1, source_height or 1080)
 
     args: list[str] = [
         ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -195,19 +312,24 @@ def build_command(
     video_inputs: list[str] = []
     audio_inputs: list[str] = []
 
-    for index in range(segment_count):
-        filters.append(_framing_chain(spec, width, height, f"[{index}:v]", f"v{index}"))
+    caption_filter = f",ass={captions_name}:fontsdir=fonts" if captions_name else ""
+    for index, segment in enumerate(spec.segments):
+        filters.append(
+            _framing_chain(
+                spec, width, height, f"[{index}:v]", f"v{index}", segment, source_aspect
+            )
+        )
         video_inputs.append(f"[v{index}]")
         filters.append(_audio_chain(spec, f"[{audio_indexes[index]}:a]", f"a{index}"))
         audio_inputs.append(f"[a{index}]")
 
     if segment_count == 1:
-        filters.append(f"[v0]fps={fps}" + (f",ass={captions_name}" if captions_name else "") + "[vcapped]")
+        filters.append(f"[v0]fps={fps}{caption_filter}[vcapped]")
         filters.append("[a0]anull[abase]")
     else:
         concat_inputs = "".join(f"{video_inputs[i]}{audio_inputs[i]}" for i in range(segment_count))
         filters.append(f"{concat_inputs}concat=n={segment_count}:v=1:a=1[vc][ac]")
-        filters.append(f"[vc]fps={fps}" + (f",ass={captions_name}" if captions_name else "") + "[vcapped]")
+        filters.append(f"[vc]fps={fps}{caption_filter}[vcapped]")
         filters.append("[ac]anull[abase]")
 
     filters.extend(_audio_graph(spec, "[abase]", music_index, total_ms))

@@ -299,6 +299,14 @@ def serialise_candidate(row: dict) -> dict:
     data["hook_detail"] = detail
     data["hook"] = detail.get("text") or data.get("hook") or ""
     data["brief"] = _loads(data.pop("brief_json", None), {})
+    # Older rows store no boundary review at all; the API still owes callers the
+    # shape the shared schema documents, with lists rather than missing keys.
+    boundary = _loads(data.pop("boundary_json", None), {}) or {}
+    boundary.setdefault("evidence", [])
+    boundary.setdefault("alternatives", [])
+    data["boundary"] = boundary
+    data["editorial"] = _loads(data.pop("editorial_json", None), {}) or {}
+    data["duration"] = _loads(data.pop("duration_json", None), {}) or {}
     data["summary"] = data.get("summary") or ""
     data["start_ms"] = data.get("user_start_ms") if data.get("user_start_ms") is not None else data["start_ms"]
     data["end_ms"] = data.get("user_end_ms") if data.get("user_end_ms") is not None else data["end_ms"]
@@ -327,7 +335,8 @@ class CandidateRepository:
                     json.dumps(candidate.get("warnings", [])), candidate.get("method", "baseline"),
                     candidate.get("method_version", "1"), candidate.get("duplicate_of"), now, now,
                     json.dumps(candidate.get("hook_detail") or {}), json.dumps(candidate.get("brief") or {}),
-                    candidate.get("summary", "")[:600],
+                    candidate.get("summary", "")[:600], json.dumps(candidate.get("boundary") or {}),
+                    json.dumps(candidate.get("editorial") or {}), json.dumps(candidate.get("duration") or {}),
                 )
             )
         with self.db.session() as conn:
@@ -336,8 +345,9 @@ class CandidateRepository:
                 """
                 INSERT INTO candidates(id, project_id, analysis_run_id, rank, start_ms, end_ms, title, hook,
                     reason, category, excerpt, scores_json, overall, warnings_json, method, method_version,
-                    duplicate_of, created_at, updated_at, hook_json, brief_json, summary)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    duplicate_of, created_at, updated_at, hook_json, brief_json, summary, boundary_json,
+                    editorial_json, duration_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 rows,
             )
@@ -421,6 +431,39 @@ class CandidateRepository:
                 "UPDATE candidates SET user_start_ms = NULL, user_end_ms = NULL, updated_at = ?"
                 " WHERE project_id = ? AND id = ?",
                 (utc_now(), project_id, candidate_id),
+            )
+        return self.get(project_id, candidate_id)
+
+    def set_editorial(
+        self,
+        project_id: str,
+        candidate_id: str,
+        editorial: dict,
+        *,
+        duration: dict | None = None,
+    ) -> dict:
+        self.get(project_id, candidate_id)
+        assignments = ["editorial_json = ?", "updated_at = ?"]
+        values: list[Any] = [json.dumps(editorial), utc_now()]
+        if duration is not None:
+            assignments.insert(0, "duration_json = ?")
+            values.insert(0, json.dumps(duration))
+        values.extend([project_id, candidate_id])
+        with self.db.session() as conn:
+            conn.execute(
+                f"UPDATE candidates SET {', '.join(assignments)} WHERE project_id = ? AND id = ?",
+                values,
+            )
+        return self.get(project_id, candidate_id)
+
+    def set_boundary(self, project_id: str, candidate_id: str, changes: dict) -> dict:
+        current = self.get(project_id, candidate_id)
+        boundary = dict(current.get("boundary") or {})
+        boundary.update(changes)
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE candidates SET boundary_json = ?, updated_at = ? WHERE project_id = ? AND id = ?",
+                (json.dumps(boundary), utc_now(), project_id, candidate_id),
             )
         return self.get(project_id, candidate_id)
 
@@ -572,6 +615,7 @@ def serialise_render(row: dict) -> dict:
     data = dict(row)
     data["spec"] = _loads(data.pop("spec_json"), {})
     data["profile_snapshot"] = _loads(data.pop("profile_snapshot_json", None), {})
+    data["review"] = _loads(data.pop("review_json", None), {})
     data.pop("relative_path", None)
     data["download_url"] = f"/api/renders/{data['id']}/download" if data.get("status") == "completed" else None
     return data
@@ -629,6 +673,18 @@ class RenderRepository:
                 "UPDATE renders SET status = 'completed', relative_path = ?, size_bytes = ?, duration_ms = ?,"
                 " width = ?, height = ?, subtitle_path = ?, finished_at = ? WHERE id = ?",
                 (relative_path, size_bytes, duration_ms, width, height, subtitle_path, utc_now(), render_id),
+            )
+
+    def update_spec(self, render_id: str, spec: dict) -> None:
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE renders SET spec_json = ? WHERE id = ?", (json.dumps(spec), render_id)
+            )
+
+    def set_review(self, render_id: str, review: dict) -> None:
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE renders SET review_json = ? WHERE id = ?", (json.dumps(review), render_id)
             )
 
     def mark_failed(self, render_id: str, code: str, message: str) -> None:
