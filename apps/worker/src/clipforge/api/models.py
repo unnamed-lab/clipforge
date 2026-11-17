@@ -78,6 +78,46 @@ class EditorialAction(BaseModel):
     apply: bool = True
 
 
+class PackagingGenerateBody(BaseModel):
+    platform: Literal["tiktok", "youtube_shorts", "instagram_reels", "cross_platform"] | None = None
+    topic: str | None = Field(default=None, max_length=120)
+    subtopics: list[str] = Field(default_factory=list, max_length=8)
+    genre: str | None = Field(default=None, max_length=60)
+    strategy: str | None = Field(default=None, max_length=60)
+    use_llm: bool = True
+    check_trend: bool = False
+    force_trend: bool = False
+    settings: dict | None = None
+
+
+class PackagingPatchBody(BaseModel):
+    platform: Literal["tiktok", "youtube_shorts", "instagram_reels", "cross_platform"] | None = None
+    metadata: dict | None = None
+    settings: dict | None = None
+    trend_action: Literal["use", "dismiss", "restore", "save", "manual"] | None = None
+    trend_id: str | None = Field(default=None, max_length=160)
+    regenerate_with_trend: bool = False
+    manual_trend: dict | None = None
+
+
+class TrendCheckBody(BaseModel):
+    platform: Literal["tiktok", "youtube_shorts", "instagram_reels", "cross_platform"] | None = None
+    topic: str | None = Field(default=None, max_length=120)
+    subtopics: list[str] = Field(default_factory=list, max_length=8)
+    genre: str | None = Field(default=None, max_length=60)
+    strategy: str | None = Field(default=None, max_length=60)
+    region: str | None = Field(default=None, max_length=40)
+    country: str | None = Field(default=None, max_length=40)
+    language: str | None = Field(default=None, max_length=40)
+    niche: str | None = Field(default=None, max_length=120)
+    audience: str | None = Field(default=None, max_length=200)
+    freshness_days: int | None = Field(default=None, ge=1, le=365)
+    limit: int | None = Field(default=None, ge=1, le=25)
+    weights: dict[str, float] | None = None
+    force: bool = False
+    settings: dict | None = None
+
+
 class RenderRequest(BaseModel):
     candidate_id: str | None = None
     segments: list[dict] | None = None

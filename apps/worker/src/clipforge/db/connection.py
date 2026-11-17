@@ -27,6 +27,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "boundary_json": "TEXT NOT NULL DEFAULT '{}'",
         "editorial_json": "TEXT NOT NULL DEFAULT '{}'",
         "duration_json": "TEXT NOT NULL DEFAULT '{}'",
+        "packaging_json": "TEXT NOT NULL DEFAULT '{}'",
     },
     "renders": {
         "kind": "TEXT NOT NULL DEFAULT 'export'",

@@ -18,7 +18,7 @@ from clipforge.rendering.spec import CAPTION_PRESETS
 
 LOGO_POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "custom")
 AUDIO_MODES = ("original", "original_plus_music", "replace")
-SAFE_SECTIONS = ("export", "captions", "audio", "branding", "brief")
+SAFE_SECTIONS = ("export", "captions", "audio", "branding", "brief", "packaging")
 
 
 class Branding(BaseModel):
@@ -124,6 +124,39 @@ class ProfileRules(BaseModel):
         }
 
 
+class PackagingPreferences(BaseModel):
+    """Default AI packaging voice and guardrails for a client.
+
+    These values are snapshotted into a project so later profile edits cannot
+    silently rewrite metadata the user already reviewed.
+    """
+
+    enabled: bool = True
+    default_platform: Literal["tiktok", "youtube_shorts", "instagram_reels", "cross_platform"] = "cross_platform"
+    tone: str = Field(default="", max_length=200)
+    audience: str = Field(default="", max_length=200)
+    language: str = Field(default="en", max_length=40)
+    region: str = Field(default="US", max_length=40)
+    niche: str = Field(default="", max_length=120)
+    brand_voice: str = Field(default="", max_length=400)
+    hashtag_style: Literal["minimal", "balanced", "descriptive"] = "balanced"
+    hashtag_count: int | None = Field(default=None, ge=0, le=30)
+    cta_preference: Literal["auto", "none", "follow", "comment", "link", "custom"] = "auto"
+    cta_text: str = Field(default="", max_length=160)
+    trend_check: Literal["automatic", "manual", "disabled"] = "manual"
+    include_keywords: bool = True
+    thumbnail_text: bool = True
+    brand_terms: list[str] = Field(default_factory=list)
+    restricted_words: list[str] = Field(default_factory=list)
+    restricted_topics: list[str] = Field(default_factory=list)
+    restricted_claims: list[str] = Field(default_factory=list)
+
+    @field_validator("brand_terms", "restricted_words", "restricted_topics", "restricted_claims")
+    @classmethod
+    def _clean_lists(cls, values: list[str]) -> list[str]:
+        return [" ".join(value.split())[:120] for value in values if value and value.strip()][:40]
+
+
 class ClientProfileDocument(BaseModel):
     """The editable body of a profile. Identity and version live in the database."""
 
@@ -134,6 +167,7 @@ class ClientProfileDocument(BaseModel):
     captions: CaptionPolicy = Field(default_factory=CaptionPolicy)
     export: ExportDefaults = Field(default_factory=ExportDefaults)
     rules: ProfileRules = Field(default_factory=ProfileRules)
+    packaging: PackagingPreferences = Field(default_factory=PackagingPreferences)
 
 
 DEFAULT_PROFILE: dict = ClientProfileDocument(name="Default").model_dump()
@@ -163,7 +197,15 @@ def resolve_settings(profile: dict | None, overrides: dict | None) -> dict:
     """
     document = copy.deepcopy((profile or {}).get("document") or DEFAULT_PROFILE)
     document.pop("name", None)
-    effective = {section: copy.deepcopy(document.get(section, {})) for section in SAFE_SECTIONS}
+    effective = {}
+    for section in SAFE_SECTIONS:
+        # Profiles written before a section existed must still resolve to the
+        # current document defaults rather than an empty object.
+        base = copy.deepcopy(DEFAULT_PROFILE.get(section) or {})
+        stored = document.get(section)
+        if isinstance(stored, dict):
+            base.update(copy.deepcopy(stored))
+        effective[section] = base
     provenance: dict[str, str] = {}
 
     for section in SAFE_SECTIONS:

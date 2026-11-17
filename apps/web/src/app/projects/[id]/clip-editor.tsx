@@ -24,6 +24,7 @@ import {
 import { Badge, ScoreMeter } from "@/components/ui";
 import { EDITORIAL_STRATEGIES } from "@clipforge/shared";
 import { RenderPanel } from "./render-panel";
+import { PackagingPanel } from "./packaging-panel";
 import { cn } from "@/lib/utils";
 
 const NUDGE_MS = 250;
@@ -39,6 +40,7 @@ export function ClipEditor({
   onPatch,
   onBoundary,
   onEditorial,
+  onCandidate,
   onRender,
   renderBusy,
 }: {
@@ -59,6 +61,7 @@ export function ClipEditor({
     action: { strategy: string; pacing_profile?: string; apply?: boolean },
   ) => Promise<void>;
   onRender: (body: Record<string, unknown>) => Promise<void>;
+  onCandidate: (candidate: Candidate) => void;
   renderBusy: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -344,6 +347,13 @@ export function ClipEditor({
         approveEditorial={approveEditorial}
         onApproveEditorial={setApproveEditorial}
         onEditorial={onEditorial}
+      />
+
+      <PackagingPanel
+        key={candidate.id}
+        projectId={projectId}
+        candidate={candidate}
+        onCandidate={onCandidate}
       />
 
       <TranscriptWindow

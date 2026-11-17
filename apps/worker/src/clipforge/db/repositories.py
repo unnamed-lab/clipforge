@@ -307,6 +307,7 @@ def serialise_candidate(row: dict) -> dict:
     data["boundary"] = boundary
     data["editorial"] = _loads(data.pop("editorial_json", None), {}) or {}
     data["duration"] = _loads(data.pop("duration_json", None), {}) or {}
+    data["packaging"] = _loads(data.pop("packaging_json", None), {}) or {}
     data["summary"] = data.get("summary") or ""
     data["start_ms"] = data.get("user_start_ms") if data.get("user_start_ms") is not None else data["start_ms"]
     data["end_ms"] = data.get("user_end_ms") if data.get("user_end_ms") is not None else data["end_ms"]
@@ -464,6 +465,15 @@ class CandidateRepository:
             conn.execute(
                 "UPDATE candidates SET boundary_json = ?, updated_at = ? WHERE project_id = ? AND id = ?",
                 (json.dumps(boundary), utc_now(), project_id, candidate_id),
+            )
+        return self.get(project_id, candidate_id)
+
+    def set_packaging(self, project_id: str, candidate_id: str, packaging: dict) -> dict:
+        self.get(project_id, candidate_id)
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE candidates SET packaging_json = ?, updated_at = ? WHERE project_id = ? AND id = ?",
+                (json.dumps(packaging, ensure_ascii=False), utc_now(), project_id, candidate_id),
             )
         return self.get(project_id, candidate_id)
 
@@ -726,6 +736,7 @@ class Repositories:
             LibrarySourceRepository,
             ProfileRepository,
             RightsRepository,
+            TrendCacheRepository,
         )
 
         self.db = db
@@ -747,3 +758,4 @@ class Repositories:
         self.library_imports = LibraryImportRepository(db)
         self.evaluations = EvaluationRepository(db)
         self.datasets = DatasetRepository(db)
+        self.trend_cache = TrendCacheRepository(db)

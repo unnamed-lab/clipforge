@@ -114,6 +114,13 @@ export function ProjectWorkspace({
     }
   }
 
+  function applyCandidate(next: Candidate) {
+    setDetail((current) => ({
+      ...current,
+      candidates: current.candidates.map((candidate) => (candidate.id === next.id ? next : candidate)),
+    }));
+  }
+
   async function patchCandidate(
     candidateId: string,
     patch: { start_ms?: number; end_ms?: number; title?: string; decision?: Candidate["decision"]; reset_edits?: boolean },
@@ -340,6 +347,7 @@ export function ProjectWorkspace({
                 onPatch={patchCandidate}
                 onBoundary={reviewBoundary}
                 onEditorial={reEvaluateEditorial}
+                onCandidate={applyCandidate}
                 onRender={renderClip}
                 renderBusy={renderRunning}
               />

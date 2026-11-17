@@ -302,3 +302,16 @@ CREATE TABLE IF NOT EXISTS dataset_items (
     exclusion_reason TEXT,
     PRIMARY KEY (dataset_id, evaluation_id)
 );
+
+CREATE TABLE IF NOT EXISTS trend_cache (
+    cache_key    TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    platform     TEXT NOT NULL,
+    query_json   TEXT NOT NULL DEFAULT '{}',
+    result_json  TEXT NOT NULL DEFAULT '{}',
+    checked_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_trend_cache_expiry ON trend_cache(expires_at);

@@ -13,7 +13,7 @@ from clipforge.rendering.spec import RenderSpec
 
 router = APIRouter(prefix="/api/projects", tags=["project settings"])
 
-OVERRIDE_SECTIONS = ("export", "captions", "audio", "branding", "brief", "rules")
+OVERRIDE_SECTIONS = ("export", "captions", "audio", "branding", "brief", "rules", "packaging")
 
 
 def _merge(base: dict, override: dict) -> dict:

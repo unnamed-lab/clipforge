@@ -80,6 +80,16 @@ class OpenAiCompatibleScorer:
             f"Rate all {len(payload_clips)} clips.\n\n"
             + json.dumps(payload_clips, ensure_ascii=False)
         )
+        parsed = self.complete_json(SYSTEM_PROMPT, user_prompt)
+        return self._validate(parsed, clips)
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        """Return one parsed JSON object from an OpenAI-compatible endpoint.
+
+        Kept separate from scoring so packaging can reuse the transport without
+        changing the scoring protocol. Callers must validate the content; this
+        method only guarantees the response parsed as a JSON object.
+        """
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -88,7 +98,7 @@ class OpenAiCompatibleScorer:
             "model": self.model,
             "temperature": 0,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "response_format": {"type": "json_object"},
@@ -113,8 +123,7 @@ class OpenAiCompatibleScorer:
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderUnavailable("The LLM endpoint returned an unexpected response", code="llm_bad_response") from exc
 
-        parsed = _parse_json(content)
-        return self._validate(parsed, clips)
+        return _parse_json(content)
 
     def _validate(self, parsed: dict, clips: list[ScorableClip]) -> LlmScoringResult:
         if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):

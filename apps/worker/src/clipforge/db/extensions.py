@@ -697,3 +697,62 @@ class DatasetRepository:
     def delete(self, dataset_id: str) -> None:
         with self.db.session() as conn:
             conn.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
+
+
+# --------------------------------------------------------------------- trend cache
+
+
+class TrendCacheRepository:
+    """Provider-aware cache for optional trend research.
+
+    The cache stores the provider result verbatim, including its limitations, so
+    a stale read can never be presented as a freshly verified metric.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def get(self, cache_key: str) -> dict | None:
+        with self.db.session() as conn:
+            row = conn.execute("SELECT * FROM trend_cache WHERE cache_key = ?", (cache_key,)).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data["query"] = loads(data.pop("query_json", None), {})
+        data["result"] = loads(data.pop("result_json", None), {})
+        return data
+
+    def put(
+        self,
+        cache_key: str,
+        *,
+        provider: str,
+        platform: str,
+        query: dict,
+        result: dict,
+        checked_at: str,
+        expires_at: str,
+    ) -> None:
+        now = utc_now()
+        with self.db.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO trend_cache(cache_key, provider, platform, query_json, result_json,
+                    checked_at, expires_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    provider = excluded.provider,
+                    platform = excluded.platform,
+                    query_json = excluded.query_json,
+                    result_json = excluded.result_json,
+                    checked_at = excluded.checked_at,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (cache_key, provider, platform, _json(query), _json(result), checked_at, expires_at, now),
+            )
+
+    def prune(self, before: str) -> int:
+        with self.db.session() as conn:
+            cursor = conn.execute("DELETE FROM trend_cache WHERE expires_at < ?", (before,))
+        return int(cursor.rowcount or 0)

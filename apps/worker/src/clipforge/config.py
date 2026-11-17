@@ -64,6 +64,9 @@ class Settings:
     youtube_api_key: str = ""
     twitch_client_id: str = ""
     twitch_client_secret: str = ""
+    trend_cache_ttl_seconds: int = 21_600
+    trend_stale_ttl_seconds: int = 604_800
+    trend_timeout_seconds: int = 12
     cors_origins: tuple[str, ...] = DEFAULT_CORS_ORIGINS
     storage_backend: str = "local"
     supabase_url: str = ""
@@ -146,6 +149,9 @@ def load_settings() -> Settings:
         youtube_api_key=os.environ.get("CLIPFORGE_YOUTUBE_API_KEY", "").strip(),
         twitch_client_id=os.environ.get("CLIPFORGE_TWITCH_CLIENT_ID", "").strip(),
         twitch_client_secret=os.environ.get("CLIPFORGE_TWITCH_CLIENT_SECRET", "").strip(),
+        trend_cache_ttl_seconds=_env_int("CLIPFORGE_TREND_CACHE_TTL_SECONDS", 21_600),
+        trend_stale_ttl_seconds=_env_int("CLIPFORGE_TREND_STALE_TTL_SECONDS", 604_800),
+        trend_timeout_seconds=_env_int("CLIPFORGE_TREND_TIMEOUT_SECONDS", 12),
         cors_origins=_env_list("CLIPFORGE_CORS_ORIGINS", DEFAULT_CORS_ORIGINS),
         storage_backend=os.environ.get("CLIPFORGE_STORAGE_BACKEND", "local").strip() or "local",
         supabase_url=os.environ.get("CLIPFORGE_SUPABASE_URL", "").strip(),

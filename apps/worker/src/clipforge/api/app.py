@@ -13,6 +13,7 @@ from clipforge import __version__
 from clipforge.api import (
     routes_analysis,
     routes_library,
+    routes_packaging,
     routes_profiles,
     routes_project_settings,
     routes_projects,
@@ -130,4 +131,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(routes_analysis.router)
     app.include_router(routes_renders.router)
     app.include_router(routes_library.router)
+    app.include_router(routes_packaging.router)
     return app
