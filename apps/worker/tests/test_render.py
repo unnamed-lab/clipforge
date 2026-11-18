@@ -61,6 +61,21 @@ def test_total_duration_is_the_sum_of_segments():
     assert spec.total_duration_ms == 17_500
 
 
+def test_editorial_narrative_roles_are_valid_render_segments():
+    # given / when
+    spec = make_spec(
+        segments=[
+            {"start_ms": 0, "end_ms": 4_000, "role": "context"},
+            {"start_ms": 10_000, "end_ms": 20_000, "role": "main"},
+            {"start_ms": 25_000, "end_ms": 35_000, "role": "development"},
+            {"start_ms": 40_000, "end_ms": 52_000, "role": "payoff"},
+        ]
+    )
+
+    # then
+    assert [segment.role for segment in spec.segments] == ["context", "main", "development", "payoff"]
+
+
 def test_segment_end_must_follow_its_start():
     # given / when / then
     with pytest.raises(ValidationError):

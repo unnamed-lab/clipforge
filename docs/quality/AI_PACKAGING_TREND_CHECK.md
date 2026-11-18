@@ -236,14 +236,16 @@ Persistence is additive:
 - default registry capability reporting with duplicate providers collapsed;
 - profile defaults/overrides and old-profile compatibility;
 - metadata edits preserving media and creating no render;
-- API config, generate, patch and automatic trend-mode wiring.
+- API config, generate, patch and automatic trend-mode wiring;
+- complete-question titles keeping their payoff up to the hard limit;
+- editorial `context`/`development`/`payoff` roles surviving the render spec.
 
 The network is mocked. Provider tests inject a fake fetch callable, trend tests
 inject a fake provider and an in-memory cache, and the LLM tests inject a fake
 `complete_json`. No test calls YouTube, TikTok, Instagram or an LLM.
 
-Full worker suite: 185 tests passing (38 in `test_packaging.py`). Worker
-`ruff check` passes. TikTok caption
+The worker suite passes for this change set (187 tests, 39 in
+`test_packaging.py`) and `ruff check` passes. TikTok caption
 length is validated in UTF-16 code units, matching the platform's field
 definition; the other configured platforms count characters. The API tests also
 cover the profile `automatic` trend mode, which runs a check without requiring

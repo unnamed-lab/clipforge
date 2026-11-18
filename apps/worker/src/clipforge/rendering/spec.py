@@ -18,6 +18,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from clipforge.editorial.models import NarrativeRole
+
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 ASPECT_DIMENSIONS: dict[str, dict[int, tuple[int, int]]] = {
@@ -262,7 +264,7 @@ class CompositionDecision(BaseModel):
 class SegmentSpan(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(gt=0)
-    role: Literal["main", "hook"] = "main"
+    role: NarrativeRole = "main"
     composition: CompositionDecision | None = None
 
     @model_validator(mode="after")

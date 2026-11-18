@@ -260,8 +260,8 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
         segments = []
         for raw in payload.segments:
             role = raw.get("role", "main")
-            if role not in {"main", "hook"}:
-                raise ValidationFailed("Segment role must be 'main' or 'hook'", code="invalid_segment")
+            if role not in {"hook", "context", "main", "development", "payoff", "loop"}:
+                raise ValidationFailed("Segment role is not a recognised narrative role", code="invalid_segment")
             segments.append({"start_ms": int(raw.get("start_ms", 0)), "end_ms": int(raw.get("end_ms", 0)),
                              "role": role})
         title = payload.title

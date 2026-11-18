@@ -318,7 +318,10 @@ def _title_variants(text: ClipText, hook_text: str, profile: dict[str, object]) 
     seen: set[str] = set()
 
     def add(candidate: str, style: str, reason: str, basis: str = "transcript") -> None:
-        value = _trim(candidate, recommended)
+        # A complete sentence or question should keep its payoff. Only trim it at
+        # the hard platform limit; fragments still use the recommended length.
+        complete = candidate.strip().endswith((".", "!", "?", "…"))
+        value = _trim(candidate, limit if complete else recommended)
         if len(value) < 8:
             value = _trim(candidate, limit)
         key = value.lower()
@@ -339,10 +342,11 @@ def _title_variants(text: ClipText, hook_text: str, profile: dict[str, object]) 
 
     if hook_text:
         exact = _clean(hook_text)
+        hook_target = limit if exact.endswith((".", "!", "?", "…")) else recommended
         reason = (
             "Uses the approved hook text exactly."
-            if _chars(exact) <= recommended
-            else "Starts from the approved hook text; trimmed to the platform's recommended title length."
+            if _chars(exact) <= hook_target
+            else "Starts from the approved hook text; trimmed only to fit the platform title limit."
         )
         add(hook_text, "quote", reason, "hook")
     for sentence in pool[:4]:

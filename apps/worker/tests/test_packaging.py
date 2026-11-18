@@ -12,6 +12,7 @@ from clipforge.packaging.generator import (
     ClipText,
     PackagingContext,
     _caption,
+    _title_variants,
     _validate,
     clip_text,
     generate_metadata,
@@ -254,6 +255,27 @@ def test_tiktok_caption_count_uses_utf16_code_units():
     utf16_units = len(caption.text.encode("utf-16-le")) // 2
     assert caption.char_count == utf16_units
     assert caption.char_count > len(caption.text)
+
+
+def test_complete_question_title_keeps_its_payoff():
+    # given
+    question = "If someone actually looked into these founders, would there be more than 10?"
+    text = ClipText(
+        sentences=[ClipSentence(text=question, start_ms=0, end_ms=1_000, sentence_id=0)],
+        full_text=question,
+        source_start_ms=0,
+        source_end_ms=1_000,
+        timeline_applied=False,
+        warnings=[],
+        sentence_ids=[0],
+    )
+
+    # when
+    titles = _title_variants(text, question, {"title_max": 100, "title_recommended": 70})
+
+    # then
+    assert len(question) > 70
+    assert titles[0].text == question
 
 
 def test_validation_checks_hashtags_and_cta_for_restricted_terms(sample_segments):
