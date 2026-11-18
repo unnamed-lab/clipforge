@@ -16,6 +16,7 @@
     "lint": "pnpm --filter @clipforge/web lint",
     "typecheck": "pnpm --filter @clipforge/web typecheck",
     "test": "pnpm --filter @clipforge/web test",
+    "test:e2e": "playwright test",
     "test:worker": "node scripts/worker.mjs test",
     "lint:worker": "node scripts/worker.mjs lint",
     "docker:build": "docker compose build",
