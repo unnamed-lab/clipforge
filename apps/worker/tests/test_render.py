@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from clipforge.profiles.spec import CaptionPolicy
+from clipforge.profiles.spec import CaptionPolicy, resolve_settings
 from clipforge.rendering.ffmpeg import build_command
 from clipforge.rendering.spec import (
     DEFAULT_CAPTION_ALIGNMENT,
@@ -93,6 +93,30 @@ def test_new_caption_policy_defaults_to_clean_podcast_at_the_bottom():
     assert policy.position == DEFAULT_CAPTION_POSITION == "bottom"
     assert policy.alignment == DEFAULT_CAPTION_ALIGNMENT == "center"
     assert policy.margin_v == DEFAULT_CAPTION_MARGIN_V == 150
+
+
+def test_saved_caption_choices_are_preserved_over_the_default():
+    # given a profile that explicitly chose a different style and position
+    profile = {
+        "document": {
+            "captions": {
+                "preset": "large",
+                "position": "top",
+                "alignment": "left",
+                "margin_v": 220,
+            }
+        }
+    }
+
+    # when
+    resolved = resolve_settings(profile, None)
+
+    # then
+    captions = resolved["settings"]["captions"]
+    assert captions["preset"] == "large"
+    assert captions["position"] == "top"
+    assert captions["alignment"] == "left"
+    assert captions["margin_v"] == 220
 
 
 def test_segment_end_must_follow_its_start():
