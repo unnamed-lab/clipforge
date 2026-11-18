@@ -122,11 +122,18 @@ def _composition_chain(
     fg_height = min(height - 2, _even(rect.height_pct * height))
     x = max(0, min(width - fg_width, int(round(rect.x_pct * width))))
     y = max(0, min(height - fg_height, int(round(rect.y_pct * height))))
+    source_crop = ""
+    if decision.source_rect is not None:
+        rect = decision.source_rect
+        source_crop = (
+            f"crop=iw*{rect.width_pct:.4f}:ih*{rect.height_pct:.4f}:"
+            f"iw*{rect.x_pct:.4f}:ih*{rect.y_pct:.4f},"
+        )
     if decision.background in {"solid", "none"}:
         background_color = decision.background_color if decision.background == "solid" else "#000000"
         chain = (
             f"color=c={background_color}:s={width}x{height}:r=30[bg_{uid}];"
-            f"{input_label}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
+            f"{input_label}{source_crop}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
             f"setsar=1[fg_{uid}];"
             f"[bg_{uid}][fg_{uid}]overlay={x}:{y}:shortest=1[composed_{uid}];"
             f"[composed_{uid}]setsar=1"
@@ -138,7 +145,7 @@ def _composition_chain(
         f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.08:saturation=0.85,"
         f"setsar=1[bg_{uid}];"
-        f"[fgsrc_{uid}]scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
+        f"[fgsrc_{uid}]{source_crop}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
         f"setsar=1[fg_{uid}];"
         f"[bg_{uid}][fg_{uid}]overlay={x}:{y}[composed_{uid}];"
         f"[composed_{uid}]setsar=1"

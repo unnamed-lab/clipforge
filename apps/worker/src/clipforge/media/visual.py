@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 SCENE_THRESHOLD = 0.28
 MIN_SCENE_MS = 1_200
 MAX_SAMPLES = 600
-CACHE_VERSION = 1
+CACHE_VERSION = 3
 _PTS_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 
 
@@ -210,6 +210,37 @@ def _extract_samples(path: Path, start_ms: int, duration_ms: int, frames_dir: Pa
     return samples, warnings
 
 
+def _content_rect(edge_mask: np.ndarray) -> tuple[float, float, float, float]:
+    """Normalised bounds of the region that actually contains detail.
+
+    Dark margins and empty letterbox bars are ignored. The result is rejected
+    when the remaining region is too small or barely smaller than the frame, so
+    a scene with a small logo is not mistaken for a document.
+    """
+    height, width = edge_mask.shape
+    if not edge_mask.any():
+        return 0.0, 0.0, 1.0, 1.0
+    columns = edge_mask.mean(axis=0)
+    rows = edge_mask.mean(axis=1)
+    xs = np.where(columns > 0.004)[0]
+    ys = np.where(rows > 0.004)[0]
+    if not len(xs) or not len(ys):
+        return 0.0, 0.0, 1.0, 1.0
+
+    pad_x = max(1, int(round(width * 0.02)))
+    pad_y = max(1, int(round(height * 0.02)))
+    x0 = max(0, int(xs[0]) - pad_x)
+    x1 = min(width, int(xs[-1]) + 1 + pad_x)
+    y0 = max(0, int(ys[0]) - pad_y)
+    y1 = min(height, int(ys[-1]) + 1 + pad_y)
+    content_w = (x1 - x0) / max(1, width)
+    content_h = (y1 - y0) / max(1, height)
+    area = content_w * content_h
+    if area >= 0.92 or area < 0.45 or content_w < 0.50 or content_h < 0.40:
+        return 0.0, 0.0, 1.0, 1.0
+    return x0 / max(1, width), y0 / max(1, height), content_w, content_h
+
+
 def frame_features(rgb: np.ndarray) -> dict:
     array = rgb.astype(np.float32) / 255.0
     if array.ndim != 3 or array.shape[2] != 3:
@@ -240,6 +271,8 @@ def frame_features(rgb: np.ndarray) -> dict:
     top_dark = float(np.mean(top < 0.10))
     bottom_dark = float(np.mean(bottom < 0.10))
 
+    content_x, content_y, content_w, content_h = _content_rect(magnitude > 0.12)
+
     red, green, blue = array[:, :, 0], array[:, :, 1], array[:, :, 2]
     skin = (red > 0.32) & (red > green * 1.04) & (green > blue * 0.72) & ((red - blue) > 0.035)
     skin_fraction = float(np.mean(skin))
@@ -265,6 +298,10 @@ def frame_features(rgb: np.ndarray) -> dict:
         "skin_x": max(0.0, min(1.0, skin_x)),
         "letterboxed": 1.0 if top_dark > 0.82 and bottom_dark > 0.82 else 0.0,
         "text_at_edges": 1.0 if border_edge_density > 0.055 else 0.0,
+        "content_x": content_x,
+        "content_y": content_y,
+        "content_width": content_w,
+        "content_height": content_h,
     }
 
 
@@ -286,6 +323,26 @@ def classify_features(features: dict) -> tuple[str, float]:
         if letterboxed:
             confidence = max(0.55, confidence - 0.05)
         return "slide", round(confidence, 3)
+    # Flat, bright graphics (charts, slides) often have very few edges because
+    # their blocks are solid colour. A bright outdoor shot with a clear subject
+    # has more edge detail, so require both flatness and high tonal spread.
+    if (
+        bright > 0.30
+        and edge < 0.030
+        and colour > 0.060
+        and float(features.get("std_luma", 0.0)) > 0.180
+        and float(features.get("border_edge_density", 0.0)) < 0.020
+    ):
+        return "slide", 0.68
+    # Dark documents and terminal captures have a low bright fraction, but
+    # their text creates substantially more edges than a dark room or face.
+    if (
+        dark > 0.30
+        and bright > 0.003
+        and edge > 0.040
+        and float(features.get("border_edge_density", 0.0)) < 0.020
+    ):
+        return "slide", 0.62
     if edge > 0.095 and bright > 0.05 and colour < 0.24:
         confidence = min(0.92, 0.45 + min(0.25, edge) + min(0.15, bright * 0.4))
         return "screen_recording", round(confidence, 3)
@@ -316,9 +373,15 @@ def _aggregate(samples: list[FrameSample], start_ms: int, end_ms: int) -> Scene:
 
     features = {}
     keys = ("edge_density", "border_edge_density", "bright_fraction", "dark_fraction",
-            "colorfulness", "letterboxed", "text_at_edges", "skin_fraction")
+            "colorfulness", "std_luma", "letterboxed", "text_at_edges", "skin_fraction",
+            "content_x", "content_y", "content_width", "content_height")
     for key in keys:
         features[key] = float(np.mean([sample.features.get(key, 0.0) for sample in inside]))
+    if content_type == "unknown":
+        aggregate_type, aggregate_confidence = classify_features(features)
+        if aggregate_type != "unknown":
+            content_type = aggregate_type
+            confidence = max(confidence, aggregate_confidence * 0.85)
     warnings: list[str] = []
     if content_type == "unknown":
         warnings.append("The scene type could not be identified confidently.")

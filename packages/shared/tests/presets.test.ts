@@ -29,7 +29,12 @@ describe("caption defaults", () => {
     expect(DEFAULT_CAPTION_PRESET).toBe("clean");
     expect(DEFAULT_CAPTION_POSITION).toBe("bottom");
     expect(DEFAULT_CAPTION_ALIGNMENT).toBe("center");
-    expect(CAPTION_POSITIONS.map((position) => position.id)).toEqual(["bottom", "center", "top"]);
+    expect(CAPTION_POSITIONS.map((position) => position.id)).toEqual([
+      "bottom",
+      "center",
+      "top",
+      "custom",
+    ]);
     expect(CAPTION_ALIGNMENTS.map((alignment) => alignment.id)).toEqual(["left", "center", "right"]);
   });
 });

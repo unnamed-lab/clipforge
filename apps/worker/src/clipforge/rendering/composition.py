@@ -157,11 +157,51 @@ def decide_composition(
         warnings.append("Low-confidence layout; review the composition before publishing.")
 
     foreground: Rect | None = None
+    source_rect: Rect | None = None
     if mode == "fit":
-        foreground = fit_rect(source_aspect, target_aspect, 0.0)
+        text_at_edges = float(scene.features.get("text_at_edges", 0.0)) > 0.5
+        content_width = float(scene.features.get("content_width", 1.0))
+        content_height = float(scene.features.get("content_height", 1.0))
+        if (
+            content in {"slide", "screen_recording", "mixed", "unknown"}
+            and not text_at_edges
+            and content_width * content_height < 0.92
+            and content_width >= 0.50
+            and content_height >= 0.40
+        ):
+            source_rect = Rect(
+                x_pct=float(scene.features.get("content_x", 0.0)),
+                y_pct=float(scene.features.get("content_y", 0.0)),
+                width_pct=content_width,
+                height_pct=content_height,
+            )
+        cropped_source_aspect = source_aspect * (
+            (source_rect.width_pct / source_rect.height_pct) if source_rect else 1.0
+        )
+        foreground = fit_rect(cropped_source_aspect, target_aspect, 0.0)
+        cropped_width = max(1.0, source_width * (source_rect.width_pct if source_rect else 1.0))
+        fit_scale = min(
+            width * foreground.width_pct / cropped_width,
+            height * foreground.height_pct / max(1.0, source_height * (source_rect.height_pct if source_rect else 1.0)),
+        )
+        if source_rect is not None:
+            warnings.append(
+                "Empty source margins were cropped before containing the evidence; review that no labels "
+                "or context were removed."
+            )
+        edge_density = float(scene.features.get("edge_density", 0.0))
+        if content in {"slide", "screen_recording", "mixed"} and fit_scale < 0.75 and edge_density >= 0.06:
+            warnings.append(
+                f"Evidence is contained at {fit_scale:.0%} of its source size; check that its text is "
+                "readable. Use a closer crop or manual composition when it is not."
+            )
+    elif mode == "crop" and float(scene.features.get("text_at_edges", 0.0)) > 0.5:
+        warnings.append("Information reaches the left/right edges; review the crop for cut-off text.")
     band = _caption_band(foreground, mode)
     if mode == "pip":
         band = CaptionBand(top_pct=0.76, bottom_pct=0.95)
+    background = "blur" if mode == "pip" else "solid"
+    background_color = "#0B0D11" if background == "solid" else "#000000"
     crop_x = 50.0
     if mode == "crop" and spec.video.crop_x_pct is not None:
         crop_x = spec.video.crop_x_pct
@@ -176,7 +216,8 @@ def decide_composition(
 
     return CompositionDecision(
         mode=mode,
-        background="blur",
+        background=background,
+        background_color=background_color,
         content_type=content,
         confidence=round(float(confidence), 3),
         reason=reason,
@@ -185,6 +226,7 @@ def decide_composition(
         crop_y_pct=crop_y,
         fit_margin_pct=0.0,
         foreground=foreground,
+        source_rect=source_rect,
         caption_band=band,
         warnings=list(dict.fromkeys(warnings)),
     )

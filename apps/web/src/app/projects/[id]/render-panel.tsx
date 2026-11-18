@@ -13,6 +13,7 @@ import {
   DEFAULT_CAPTION_ALIGNMENT,
   DEFAULT_CAPTION_MARGIN_V,
   DEFAULT_CAPTION_POSITION,
+  DEFAULT_CAPTION_POSITION_PCT,
   DEFAULT_CAPTION_PRESET,
   formatBytes,
   formatDuration,
@@ -55,6 +56,7 @@ export function RenderPanel({
   const [captionPreset, setCaptionPreset] = useState<CaptionPresetId>(DEFAULT_CAPTION_PRESET);
   const [captionFont, setCaptionFont] = useState<string>("Montserrat");
   const [captionPosition, setCaptionPosition] = useState<CaptionPositionId>(DEFAULT_CAPTION_POSITION);
+  const [captionPositionPct, setCaptionPositionPct] = useState(DEFAULT_CAPTION_POSITION_PCT);
   const [captionAlignment, setCaptionAlignment] = useState<CaptionAlignmentId>(DEFAULT_CAPTION_ALIGNMENT);
   const [captionMarginV, setCaptionMarginV] = useState(DEFAULT_CAPTION_MARGIN_V);
   const [captionSaveState, setCaptionSaveState] = useState<"loading" | "saving" | "saved" | "error">("loading");
@@ -70,10 +72,11 @@ export function RenderPanel({
       JSON.stringify({
         preset: captionPreset,
         position: captionPosition,
+        position_pct: captionPositionPct,
         alignment: captionAlignment,
         margin_v: captionMarginV,
       }),
-    [captionPreset, captionPosition, captionAlignment, captionMarginV],
+    [captionPreset, captionPosition, captionPositionPct, captionAlignment, captionMarginV],
   );
   const captionControlsDisabled = !captions || captionSaveState === "loading";
 
@@ -93,9 +96,14 @@ export function RenderPanel({
             ? (stored.preset as CaptionPresetId)
             : DEFAULT_CAPTION_PRESET;
         const position =
-          stored.position === "top" || stored.position === "center" || stored.position === "bottom"
+          stored.position === "top" ||
+          stored.position === "center" ||
+          stored.position === "bottom" ||
+          stored.position === "custom"
             ? stored.position
             : DEFAULT_CAPTION_POSITION;
+        const positionPct =
+          typeof stored.position_pct === "number" ? stored.position_pct : DEFAULT_CAPTION_POSITION_PCT;
         const alignment =
           stored.alignment === "left" || stored.alignment === "right" || stored.alignment === "center"
             ? stored.alignment
@@ -103,11 +111,13 @@ export function RenderPanel({
         const margin = typeof stored.margin_v === "number" ? stored.margin_v : DEFAULT_CAPTION_MARGIN_V;
         setCaptionPreset(preset);
         setCaptionPosition(position);
+        setCaptionPositionPct(positionPct);
         setCaptionAlignment(alignment);
         setCaptionMarginV(margin);
         savedSnapshotRef.current = JSON.stringify({
           preset,
           position,
+          position_pct: positionPct,
           alignment,
           margin_v: margin,
         });
@@ -120,6 +130,7 @@ export function RenderPanel({
         savedSnapshotRef.current = JSON.stringify({
           preset: DEFAULT_CAPTION_PRESET,
           position: DEFAULT_CAPTION_POSITION,
+          position_pct: DEFAULT_CAPTION_POSITION_PCT,
           alignment: DEFAULT_CAPTION_ALIGNMENT,
           margin_v: DEFAULT_CAPTION_MARGIN_V,
         });
@@ -153,6 +164,7 @@ export function RenderPanel({
                   ...existing,
                   preset: captionPreset,
                   position: captionPosition,
+                  position_pct: captionPositionPct,
                   alignment: captionAlignment,
                   margin_v: captionMarginV,
                 },
@@ -167,10 +179,19 @@ export function RenderPanel({
       })();
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [captionAlignment, captionMarginV, captionPosition, captionPreset, captionSnapshot, projectId]);
+  }, [
+    captionAlignment,
+    captionMarginV,
+    captionPosition,
+    captionPositionPct,
+    captionPreset,
+    captionSnapshot,
+    projectId,
+  ]);
 
   function resetCaptionPosition() {
     setCaptionPosition(DEFAULT_CAPTION_POSITION);
+    setCaptionPositionPct(DEFAULT_CAPTION_POSITION_PCT);
     setCaptionAlignment(DEFAULT_CAPTION_ALIGNMENT);
     setCaptionMarginV(DEFAULT_CAPTION_MARGIN_V);
   }
@@ -194,6 +215,7 @@ export function RenderPanel({
         captions: {
           font_family: captionFont,
           position: captionPosition,
+          position_pct: captionPositionPct,
           alignment: captionAlignment,
           margin_v: captionMarginV,
         },
@@ -294,6 +316,7 @@ export function RenderPanel({
           aspect={aspect}
           mode={composition}
           captionPosition={captionPosition}
+          captionPositionPct={captionPositionPct}
           captionAlignment={captionAlignment}
         />
         <div className="space-y-2">
@@ -415,6 +438,7 @@ export function RenderPanel({
               disabled={
                 captionControlsDisabled ||
                 (captionPosition === DEFAULT_CAPTION_POSITION &&
+                  captionPositionPct === DEFAULT_CAPTION_POSITION_PCT &&
                   captionAlignment === DEFAULT_CAPTION_ALIGNMENT &&
                   captionMarginV === DEFAULT_CAPTION_MARGIN_V)
               }
@@ -474,6 +498,27 @@ export function RenderPanel({
               />
               <span className="block text-[10.5px] leading-relaxed text-mist-600">
                 The export keeps captions above the platform-safe bottom edge.
+              </span>
+            </label>
+          ) : null}
+          {captionPosition === "custom" ? (
+            <label className="block space-y-1 text-[11px] text-mist-500">
+              <span className="flex justify-between">
+                <span>Vertical position</span>
+                <span className="numeric text-mist-300">{captionPositionPct}%</span>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={captionPositionPct}
+                onChange={(event) => setCaptionPositionPct(Number(event.target.value))}
+                className="w-full accent-ember-500"
+                disabled={captionControlsDisabled}
+              />
+              <span className="block text-[10.5px] leading-relaxed text-mist-600">
+                0% is the top edge and 100% is the bottom. The renderer clamps the block inside the safe area.
               </span>
             </label>
           ) : null}
@@ -557,17 +602,20 @@ function CompositionPreview({
   aspect,
   mode,
   captionPosition,
+  captionPositionPct,
   captionAlignment,
 }: {
   aspect: AspectId;
   mode: CompositionModeId;
   captionPosition: CaptionPositionId;
+  captionPositionPct: number;
   captionAlignment: CaptionAlignmentId;
 }) {
   const ratio = aspect === "9:16" ? "9 / 16" : aspect === "1:1" ? "1 / 1" : "16 / 9";
   const contained = mode === "fit" || mode === "split";
   const pip = mode === "pip";
   const bottomInset = aspect === "9:16" ? "18%" : "10%";
+  const customTop = `${Math.max(0, Math.min(88, captionPositionPct - 6))}%`;
   const horizontal =
     captionAlignment === "left"
       ? { left: "8%", right: "auto" }
@@ -612,7 +660,9 @@ function CompositionPreview({
               ? { ...horizontal, top: "44%", height: "12%" }
               : captionPosition === "top"
                 ? { ...horizontal, top: "8%", height: "12%" }
-                : { ...horizontal, bottom: bottomInset, height: "12%" }
+                : captionPosition === "custom"
+                  ? { ...horizontal, top: customTop, height: "12%" }
+                  : { ...horizontal, bottom: bottomInset, height: "12%" }
           }
         >
           <span className="absolute inset-0 grid place-items-center text-[8px] uppercase tracking-[0.2em] text-ember-300/80">

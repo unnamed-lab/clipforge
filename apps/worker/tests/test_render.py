@@ -93,6 +93,7 @@ def test_new_caption_policy_defaults_to_clean_podcast_at_the_bottom():
     assert policy.position == DEFAULT_CAPTION_POSITION == "bottom"
     assert policy.alignment == DEFAULT_CAPTION_ALIGNMENT == "center"
     assert policy.margin_v == DEFAULT_CAPTION_MARGIN_V == 150
+    assert policy.position_pct == 80.0
 
 
 def test_saved_caption_choices_are_preserved_over_the_default():
@@ -294,6 +295,20 @@ def test_second_segment_captions_keep_their_timeline_offset():
     assert "0:00:01.00,0:00:02.00" in events[0]
     # the second clip starts at 5s on the assembled timeline
     assert "0:00:06.00,0:00:07.00" in events[1]
+
+
+def test_custom_caption_position_emits_a_real_ass_position():
+    # given an explicit vertical percentage
+    spec = make_spec(caption_overrides={"position": "custom", "position_pct": 25})
+    words = [{"start_ms": 500, "end_ms": 900, "word": "Custom"}]
+
+    # when
+    ass = build_ass([(0, 3_000)], [words], spec, 720, 1280)
+
+    # then
+    event = ass.split("[Events]")[1]
+    assert "\\pos(" in event
+    assert "\\an5" in event
 
 
 def test_caption_text_is_escaped_for_ass():

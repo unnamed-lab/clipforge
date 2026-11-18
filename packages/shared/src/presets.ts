@@ -41,10 +41,12 @@ export const CAPTION_POSITIONS = [
   { id: "bottom", label: "Bottom", hint: "Default, inside the platform-safe area" },
   { id: "center", label: "Middle", hint: "Centred, for sparse frames" },
   { id: "top", label: "Top", hint: "Above faces and lower content" },
+  { id: "custom", label: "Custom", hint: "Choose a vertical position" },
 ] as const;
 
 export type CaptionPositionId = (typeof CAPTION_POSITIONS)[number]["id"];
 export const DEFAULT_CAPTION_POSITION: CaptionPositionId = "bottom";
+export const DEFAULT_CAPTION_POSITION_PCT = 80;
 
 export const CAPTION_ALIGNMENTS = [
   { id: "left", label: "Left" },
@@ -230,7 +232,7 @@ export const QUALITY_PROFILES = [
 export const COMPOSITION_MODES = [
   { id: "auto", label: "Auto", hint: "Detect slides, screens and speakers" },
   { id: "crop", label: "Fill / crop", hint: "Fill the frame; edges may be lost" },
-  { id: "fit", label: "Contain", hint: "Show the whole source over a blurred fill" },
+  { id: "fit", label: "Contain", hint: "Show the whole source over a neutral fill" },
   { id: "pip", label: "Picture in picture", hint: "Full source over a blurred background" },
   { id: "split", label: "Split / stacked", hint: "Unavailable for a single source" },
   { id: "manual", label: "Manual", hint: "Per-scene overrides in the editor" },

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
+from clipforge.media.visual import classify_features, frame_features
 from clipforge.quality.boundaries import review_ending
 from clipforge.ranking.sentences import Sentence
 from clipforge.rendering.composition import decide_composition, fit_rect
@@ -12,6 +15,7 @@ from clipforge.rendering.spec import (
     CAPTION_PRESETS,
     CaptionBand,
     CompositionDecision,
+    Rect,
     RenderSpec,
     build_spec,
 )
@@ -47,6 +51,129 @@ def _words() -> list[dict]:
 
 
 # --- geometry ----------------------------------------------------------------
+
+
+def test_evidence_fit_uses_a_neutral_background_and_warns_when_small():
+    # given dense text in a 16:9 source going into a 9:16 frame
+    scene = Scene(
+        start_ms=0,
+        end_ms=4_000,
+        content_type="slide",
+        confidence=0.9,
+        subject_x=0.5,
+        features={"edge_density": 0.12, "text_at_edges": 1.0},
+    )
+
+    # when
+    decision = decide_composition(scene, _spec(), 1920, 1080)
+
+    # then
+    assert decision.mode == "fit"
+    assert decision.background == "solid"
+    assert any("readable" in warning for warning in decision.warnings)
+
+
+def test_dark_text_document_is_not_mistaken_for_an_unknown_scene():
+    # given a dark screenshot with text edges but almost no bright pixels
+    features = {
+        "edge_density": 0.053,
+        "border_edge_density": 0.0,
+        "bright_fraction": 0.006,
+        "dark_fraction": 0.676,
+        "text_at_edges": 0.0,
+    }
+
+    # when
+    content_type, confidence = classify_features(features)
+
+    # then
+    assert content_type == "slide"
+    assert confidence >= 0.6
+
+
+def test_flat_bright_chart_is_not_mistaken_for_a_talking_head():
+    # given a flat chart with solid colour blocks and a red/blue skin false positive
+    features = {
+        "edge_density": 0.012,
+        "border_edge_density": 0.001,
+        "bright_fraction": 0.466,
+        "dark_fraction": 0.002,
+        "colorfulness": 0.109,
+        "std_luma": 0.245,
+        "skin_fraction": 0.209,
+        "text_at_edges": 0.0,
+    }
+
+    # when
+    content_type, confidence = classify_features(features)
+
+    # then
+    assert content_type == "slide"
+    assert confidence >= 0.6
+
+
+def test_content_rect_ignores_empty_source_margins():
+    # given a document-like panel inside a larger plain frame
+    frame = np.full((144, 256, 3), 245, dtype=np.uint8)
+    frame[20:120, 40:210] = 30
+    frame[35:45, 55:195] = 245
+    frame[60:70, 55:195] = 245
+    frame[85:95, 55:195] = 245
+
+    # when
+    features = frame_features(frame)
+
+    # then
+    assert features["content_width"] < 0.95
+    assert features["content_height"] < 0.95
+    assert features["content_width"] * features["content_height"] > 0.45
+
+
+def test_contained_evidence_uses_the_detected_content_rect():
+    # given a slide whose detail sits inside plain margins
+    scene = Scene(
+        start_ms=0,
+        end_ms=4_000,
+        content_type="slide",
+        confidence=0.9,
+        subject_x=0.5,
+        features={
+            "edge_density": 0.12,
+            "text_at_edges": 0.0,
+            "content_x": 0.10,
+            "content_y": 0.15,
+            "content_width": 0.80,
+            "content_height": 0.65,
+        },
+    )
+
+    # when
+    decision = decide_composition(scene, _spec(), 1920, 1080)
+
+    # then
+    assert decision.mode == "fit"
+    assert decision.source_rect is not None
+    assert decision.source_rect.width_pct == 0.8
+    assert any("margins were cropped" in warning for warning in decision.warnings)
+
+
+def test_cropped_talking_head_with_edge_text_gets_a_review_warning():
+    # given a speaker scene with information touching the borders
+    scene = Scene(
+        start_ms=0,
+        end_ms=4_000,
+        content_type="talking_head",
+        confidence=0.9,
+        subject_x=0.5,
+        features={"edge_density": 0.04, "text_at_edges": 1.0},
+    )
+
+    # when
+    decision = decide_composition(scene, _spec(), 1920, 1080)
+
+    # then
+    assert decision.mode == "crop"
+    assert any("cut-off text" in warning for warning in decision.warnings)
 
 
 def test_wide_source_is_contained_inside_a_vertical_frame():
@@ -261,6 +388,36 @@ def test_two_contained_segments_get_unique_filter_labels(tmp_path: Path):
     assert graph.count("[bg_v1]") == 2
     assert "ass=captions.ass:fontsdir=fonts" in graph
     assert graph.count("ass=") == 1
+
+
+def test_contained_evidence_crops_empty_margins_before_scaling(tmp_path: Path):
+    # given a contained slide with a conservative content crop
+    spec = _spec(segments=[{"start_ms": 0, "end_ms": 4_000}])
+    spec.segments[0].composition = CompositionDecision(
+        mode="fit",
+        background="solid",
+        background_color="#0B0D11",
+        foreground=fit_rect(1.9, 9 / 16),
+        source_rect=Rect(x_pct=0.10, y_pct=0.15, width_pct=0.80, height_pct=0.65),
+        caption_band=CaptionBand(top_pct=0.66, bottom_pct=0.82),
+    )
+
+    # when
+    command = build_command(
+        spec,
+        source=tmp_path / "source.mp4",
+        cwd=tmp_path,
+        has_audio=False,
+        source_fps=30.0,
+        captions_name=None,
+        source_width=1920,
+        source_height=1080,
+    )
+
+    # then
+    graph = command.args[command.args.index("-filter_complex") + 1]
+    assert "crop=iw*0.8000:ih*0.6500:iw*0.1000:ih*0.1500" in graph
+    assert "color=c=#0B0D11" in graph
 
 
 def test_crop_segment_uses_measured_x_and_y_offsets(tmp_path: Path):

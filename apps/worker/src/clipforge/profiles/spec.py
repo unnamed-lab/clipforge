@@ -19,6 +19,7 @@ from clipforge.rendering.spec import (
     DEFAULT_CAPTION_ALIGNMENT,
     DEFAULT_CAPTION_MARGIN_V,
     DEFAULT_CAPTION_POSITION,
+    DEFAULT_CAPTION_POSITION_PCT,
     DEFAULT_CAPTION_PRESET,
 )
 
@@ -91,7 +92,8 @@ class CaptionPolicy(BaseModel):
     required: bool = False
     preset: str = DEFAULT_CAPTION_PRESET
     highlight_words: bool = True
-    position: Literal["bottom", "center", "top"] = DEFAULT_CAPTION_POSITION
+    position: Literal["bottom", "center", "top", "custom"] = DEFAULT_CAPTION_POSITION
+    position_pct: float = Field(default=DEFAULT_CAPTION_POSITION_PCT, ge=0, le=100)
     alignment: Literal["left", "center", "right"] = DEFAULT_CAPTION_ALIGNMENT
     margin_v: int = Field(default=DEFAULT_CAPTION_MARGIN_V, ge=0, le=900)
     max_chars_per_line: int = Field(default=0, ge=0, le=80)

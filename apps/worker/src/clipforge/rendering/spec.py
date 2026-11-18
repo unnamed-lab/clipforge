@@ -26,6 +26,7 @@ DEFAULT_CAPTION_PRESET = "clean"
 DEFAULT_CAPTION_POSITION = "bottom"
 DEFAULT_CAPTION_ALIGNMENT = "center"
 DEFAULT_CAPTION_MARGIN_V = 150
+DEFAULT_CAPTION_POSITION_PCT = 80.0
 
 ASPECT_DIMENSIONS: dict[str, dict[int, tuple[int, int]]] = {
     "9:16": {1080: (1080, 1920), 720: (720, 1280)},
@@ -106,7 +107,8 @@ class CaptionSettings(BaseModel):
     font_size: int = Field(default=54, ge=18, le=140)
     bold: bool = True
     weight: Literal["auto", "regular", "medium", "bold", "black"] = "auto"
-    position: Literal["bottom", "center", "top"] = DEFAULT_CAPTION_POSITION
+    position: Literal["bottom", "center", "top", "custom"] = DEFAULT_CAPTION_POSITION
+    position_pct: float = Field(default=DEFAULT_CAPTION_POSITION_PCT, ge=0, le=100)
     margin_v: int = Field(default=DEFAULT_CAPTION_MARGIN_V, ge=0, le=900)
     margin_h: int = Field(default=64, ge=0, le=360)
     primary_color: str = "#FFFFFF"
@@ -251,6 +253,8 @@ class CompositionDecision(BaseModel):
     crop_y_pct: float = Field(default=50.0, ge=0.0, le=100.0)
     fit_margin_pct: float = Field(default=0.0, ge=0.0, le=0.20)
     foreground: Rect | None = None
+    # Conservative crop of empty source margins before a contained layout.
+    source_rect: Rect | None = None
     # Picture-in-picture keeps the whole source visible over a blurred fill.
     pip_scale_pct: float = Field(default=72.0, ge=30.0, le=100.0)
     pip_position: Literal["center", "top", "bottom"] = "center"

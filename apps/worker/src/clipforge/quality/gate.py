@@ -273,6 +273,25 @@ def run_export_gate(
     else:
         checks.append(_check("captions", "Caption bounds", "pass", "Burned-in captions are off."))
 
+    composition_warnings = list(dict.fromkeys(
+        warning
+        for segment in spec.segments
+        if segment.composition is not None
+        for warning in segment.composition.warnings
+    ))
+    if composition_warnings:
+        checks.append(
+            _check(
+                "composition",
+                "Composition review",
+                "warn",
+                " ".join(composition_warnings[:4])[:600],
+                warnings=composition_warnings[:12],
+            )
+        )
+    else:
+        checks.append(_check("composition", "Composition review", "pass", "No composition warnings."))
+
     overlays = overlay_report or {}
     if overlays.get("requested"):
         overlay_status = "pass" if overlays.get("applied") else "fail"

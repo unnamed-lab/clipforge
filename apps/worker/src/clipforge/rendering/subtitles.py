@@ -46,6 +46,7 @@ class CaptionChunk:
     width_px: float
     block_height_px: float
     overflow: bool = False
+    position_tag: str = ""
 
 
 @dataclass
@@ -123,16 +124,18 @@ def _band(
     height: int,
 ) -> tuple[float, float]:
     safe_bottom = _safe_bottom(width, height)
+    if captions.position == "custom":
+        return 0.04, safe_bottom
+    if captions.position == "top":
+        return 0.04, 0.34
+    if captions.position == "center":
+        return 0.34, 0.66
     if composition and captions.avoid_visual_overlap:
         top = max(0.04, min(composition.caption_band.top_pct, 0.66))
         bottom = min(safe_bottom, composition.caption_band.bottom_pct)
         if bottom - top < 0.12:
             bottom = min(safe_bottom, top + 0.12)
         return top, bottom
-    if captions.position == "top":
-        return 0.04, 0.34
-    if captions.position == "center":
-        return 0.34, 0.66
     return 0.62, safe_bottom
 
 
@@ -316,6 +319,8 @@ def _render_event(
         effect = "{\\fscx86\\fscy86\\t(0,110,\\fscx100\\fscy100)}"
     if chunk.font_size != base_size:
         effect += f"{{\\fs{chunk.font_size}}}"
+    if chunk.position_tag:
+        effect += chunk.position_tag
     flat_index = 0
     rendered_lines: list[str] = []
     for line in chunk.lines:
@@ -375,7 +380,7 @@ def build_captions(
         back_colour = f"&H{alpha:02X}000000"
     else:
         back_colour = "&HFF000000"
-    align = ALIGNMENT[(captions.position, captions.alignment)]
+    align = ALIGNMENT.get((captions.position, captions.alignment), 5)
     bold_flag = -1 if font.file == "Inter-Variable.ttf" and font.weight >= 700 else 0
 
     header = [
@@ -482,6 +487,20 @@ def build_captions(
                         "The caption block is taller than the safe band left by the picture; "
                         "captions are placed over the picture edge."
                     )
+                position_tag = ""
+                if captions.position == "custom":
+                    y_center = int(round(captions.position_pct / 100 * height))
+                    half = max(1, block // 2)
+                    top_limit = int(round(band[0] * height)) + 8 + half
+                    bottom_limit = int(round(band[1] * height)) - 8 - half
+                    y_center = max(top_limit, min(y_center, bottom_limit))
+                    if captions.alignment == "left":
+                        anchor, x = 4, margin_h
+                    elif captions.alignment == "right":
+                        anchor, x = 6, width - margin_h
+                    else:
+                        anchor, x = 5, width // 2
+                    position_tag = f"{{\\an{anchor}\\pos({x},{y_center})}}"
                 chunk = CaptionChunk(
                     words=chunk_words,
                     lines=lines,
@@ -490,6 +509,7 @@ def build_captions(
                     width_px=width_px,
                     block_height_px=block,
                     overflow=overflow,
+                    position_tag=position_tag,
                 )
                 chunk_start = chunk.words[0].start_ms
                 chunk_end = min(timeline_cursor + span_length, chunk.words[-1].end_ms + CHUNK_TAIL_MS)

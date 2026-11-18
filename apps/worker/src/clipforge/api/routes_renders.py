@@ -44,7 +44,7 @@ def _caption_overrides(settings: dict, payload: RenderRequest) -> dict:
         "background_opacity": captions.get("background_opacity", 65),
         "highlight": "word" if captions.get("highlight_words", True) else "none",
     }
-    for key in ("position", "alignment", "margin_v"):
+    for key in ("position", "position_pct", "alignment", "margin_v"):
         if key in captions:
             overrides[key] = captions[key]
     if payload.captions is not None:
