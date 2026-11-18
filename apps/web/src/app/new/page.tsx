@@ -21,11 +21,10 @@ export default async function NewProjectPage() {
     <div className="mx-auto max-w-3xl space-y-6">
       <div className="space-y-2">
         <p className="label">Step 1 of 4</p>
-        <h1 className="text-[24px] font-semibold leading-tight text-mist-50">Bring in a recording</h1>
+        <h1 className="text-[24px] font-semibold leading-tight text-mist-50">Start a project</h1>
         <p className="max-w-xl text-[13.5px] leading-relaxed text-mist-400">
-          Use an original file or a link you have the rights to reuse. Clipforge copies the file into its
-          local workspace, verifies it is really a video, and reads its duration before anything else
-          happens.
+          Bring in a file, or a link you have the rights to use. Clipforge copies it into the local
+          workspace and checks it&apos;s really a video before anything else starts.
         </p>
       </div>
 

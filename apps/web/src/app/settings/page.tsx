@@ -43,7 +43,7 @@ export default async function SettingsPage() {
     <div className="space-y-7">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-2">
-          <p className="label">Settings</p>
+          <p className="label">Engine room</p>
           <h1 className="text-[24px] font-semibold leading-tight text-mist-50">Local engine</h1>
           <p className="max-w-2xl text-[13.5px] leading-relaxed text-mist-400">
             Everything Clipforge needs runs on this machine. This page reports what the worker can actually
@@ -125,8 +125,8 @@ export default async function SettingsPage() {
               title="Transcription models"
               description="Models download once into the workspace model cache. Larger models are more accurate and considerably slower on a laptop CPU."
             />
-            <div className="overflow-hidden rounded-lg border border-white/8">
-              <table className="w-full text-left text-[12.5px]">
+            <div className="overflow-x-auto rounded-lg border border-white/8">
+              <table className="w-full min-w-[420px] text-left text-[12.5px]">
                 <thead className="bg-white/[0.03] text-mist-500">
                   <tr>
                     <th className="px-3 py-2 font-medium">Model</th>

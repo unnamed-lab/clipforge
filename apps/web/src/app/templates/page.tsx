@@ -49,11 +49,10 @@ export default function TemplatesPage() {
     <div className="space-y-7">
       <div className="space-y-2">
         <p className="label">Templates</p>
-        <h1 className="text-[24px] font-semibold leading-tight text-mist-50">Export recipes</h1>
+        <h1 className="text-[24px] font-semibold leading-tight text-mist-50">Recipes</h1>
         <p className="max-w-2xl text-[13.5px] leading-relaxed text-mist-400">
-          These are the combinations that work for the material Clipforge handles best. Each one maps to
-          settings in the export panel — pick them when you render a clip. Nothing is applied
-          automatically, and no template changes what the ranker considers a good moment.
+          Four starting points for the export panel. Each one sets framing, resolution and captions — none
+          of them changes how moments are ranked.
         </p>
       </div>
 
@@ -67,16 +66,18 @@ export default function TemplatesPage() {
                   <h2 className="text-[14px] font-medium text-mist-50">{recipe.name}</h2>
                   <p className="text-[12px] leading-relaxed text-mist-500">{recipe.use}</p>
                 </div>
-                <CaptionSample
-                  aspect={recipe.aspect}
-                  color={preset.sample.highlight}
-                  weight={preset.sample.weight}
-                  size={preset.sample.size}
-                  position={preset.sample.position}
-                />
+                <div className="flex h-[100px] shrink-0 items-start justify-end">
+                  <CaptionSample
+                    aspect={recipe.aspect}
+                    color={preset.sample.highlight}
+                    weight={preset.sample.weight}
+                    size={preset.sample.size}
+                    position={preset.sample.position}
+                  />
+                </div>
               </div>
 
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11.5px]">
+              <dl className="grid grid-cols-1 gap-y-1.5 text-[11.5px] sm:grid-cols-2 sm:gap-x-4">
                 {[
                   ["Frame", recipe.aspect],
                   ["Fill", recipe.framing],

@@ -1,21 +1,29 @@
 import Link from "next/link";
-import { ArrowLeft, Compass } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
+import { BrandMark } from "@/components/brand-mark";
 
 export default function NotFound() {
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center text-center">
-      <div className="relative mb-6 grid size-16 place-items-center rounded-2xl border border-white/10 bg-ink-900 shadow-xl">
-        <Compass className="size-8 text-ember-400 animate-pulse" />
+    <div className="flex min-h-[62vh] flex-col items-center justify-center px-1 text-center">
+      <div className="mb-6 grid size-16 place-items-center rounded-xl border border-white/10 bg-ink-900">
+        <BrandMark className="size-9 text-ember-500" />
       </div>
-      <p className="label mb-2 text-ember-400">404 · Clip Not Found</p>
-      <h1 className="text-3xl font-semibold tracking-tight text-mist-50">This cut doesn&apos;t exist</h1>
-      <p className="mt-3 max-w-md text-sm text-mist-400">
-        The recording, candidate, or studio view you&apos;re looking for was moved or never forged.
+      <p className="label mb-2">404</p>
+      <h1 className="text-[26px] font-semibold leading-tight text-mist-50 sm:text-3xl">
+        This cut doesn&apos;t exist
+      </h1>
+      <p className="mt-3 max-w-sm text-[13.5px] leading-relaxed text-mist-400">
+        The page you followed was moved, or it never made it out of the cutting room.
       </p>
-      <Link href="/" className="btn btn-primary mt-6">
-        <ArrowLeft className="size-4" />
-        Return to Studio Desk
-      </Link>
+      <div className="mt-6 flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+        <Link href="/" className="btn btn-primary w-full sm:w-auto">
+          <ArrowLeft className="size-4" strokeWidth={2} />
+          Back to projects
+        </Link>
+        <Link href="/new" className="btn w-full sm:w-auto">
+          Start a project
+        </Link>
+      </div>
     </div>
   );
 }

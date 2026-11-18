@@ -98,12 +98,14 @@ export function Alert({
 
 export function EmptyState({
   icon,
+  illustration,
   title,
   description,
   action,
   className,
 }: {
   icon?: ReactNode;
+  illustration?: ReactNode;
   title: string;
   description: string;
   action?: ReactNode;
@@ -112,17 +114,38 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-white/12 px-6 py-12 text-center",
+        "flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-white/12 px-5 py-12 text-center sm:px-6",
         className,
       )}
     >
-      {icon ? <div className="text-mist-600">{icon}</div> : null}
-      <div className="space-y-1">
+      {illustration}
+      {icon ? (
+        <div className="grid size-11 place-items-center rounded-lg border border-white/8 bg-ink-900 text-mist-500">
+          {icon}
+        </div>
+      ) : null}
+      <div className="space-y-1.5">
         <p className="text-sm font-semibold text-mist-100">{title}</p>
         <p className="mx-auto max-w-sm text-[13px] leading-relaxed text-mist-500">{description}</p>
       </div>
       {action}
     </div>
+  );
+}
+
+/** A hover/focus hint. The bubble is decorative; the trigger owns the accessible name. */
+export function Tooltip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <span className="group/tip relative inline-flex">
+      {children}
+      <span
+        role="tooltip"
+        aria-hidden="true"
+        className="pointer-events-none absolute right-0 top-full z-50 mt-2 w-max max-w-[260px] rounded-md border border-white/10 bg-ink-850 px-2.5 py-1.5 text-left text-[11.5px] leading-snug text-mist-300 opacity-0 shadow-[0_12px_28px_-16px_rgba(0,0,0,0.9)] transition-opacity duration-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100"
+      >
+        {label}
+      </span>
+    </span>
   );
 }
 

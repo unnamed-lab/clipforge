@@ -28,7 +28,8 @@
   --color-signal-bad: #ef8b7e;
   --color-signal-info: #8fb8f2;
 
-  --font-sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: var(--font-dm-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SFMono-Regular", ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
 
   --radius-xs: 4px;
@@ -49,20 +50,49 @@
   }
 
   body {
+    /* One neutral tone shift, no colour wash. Depth comes from the surfaces. */
     background-color: var(--color-ink-950);
-    background-image:
-      radial-gradient(1200px 600px at 20% -10%, rgba(233, 180, 76, 0.07), transparent 60%),
-      radial-gradient(800px 500px at 100% 0%, rgba(143, 184, 242, 0.05), transparent 55%);
+    background-image: linear-gradient(180deg, #0d0e12, var(--color-ink-950) 46%);
     background-repeat: no-repeat;
     color: var(--color-mist-100);
     font-family: var(--font-sans);
-    font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+    font-feature-settings: "ss01";
     -webkit-font-smoothing: antialiased;
     min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  /* Film grain on the bench. Behind every layer, never over content. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0.045;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 140px 140px;
+  }
+
+  /* Two tight diagonal light hairlines off the top edge, fading into the bench. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0 0 auto 0;
+    z-index: -1;
+    height: 240px;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(
+      115deg,
+      transparent 0 126px,
+      rgba(233, 180, 76, 0.06) 126px 127px,
+      transparent 127px 252px
+    );
+    mask-image: linear-gradient(180deg, black, transparent 78%);
   }
 
   ::selection {
-    background: rgba(233, 180, 76, 0.28);
+    background: rgba(233, 180, 76, 0.24);
     color: var(--color-mist-50);
   }
 
@@ -72,8 +102,11 @@
     border-radius: 4px;
   }
 
-  h1, h2, h3, h4 {
-    letter-spacing: -0.022em;
+  h1,
+  h2,
+  h3,
+  h4 {
+    letter-spacing: -0.021em;
     text-wrap: balance;
   }
 
@@ -81,7 +114,10 @@
     text-wrap: pretty;
   }
 
-  input, select, textarea, button {
+  input,
+  select,
+  textarea,
+  button {
     font: inherit;
   }
 
@@ -104,14 +140,14 @@
 
 @layer components {
   .surface {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.012));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.026), rgba(255, 255, 255, 0.01));
     background-color: var(--color-ink-900);
     border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: var(--radius-lg);
   }
 
   .surface-raised {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.042), rgba(255, 255, 255, 0.014));
     background-color: var(--color-ink-850);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: var(--radius-lg);
@@ -119,11 +155,10 @@
   }
 
   .label {
-    font-size: 11px;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: 0.004em;
     color: var(--color-mist-500);
-    font-weight: 600;
   }
 
   .numeric {
@@ -140,13 +175,14 @@
     padding: 0 14px;
     border-radius: 8px;
     font-size: 13px;
-    font-weight: 550;
+    font-weight: 500;
     border: 1px solid rgba(255, 255, 255, 0.1);
     background: rgba(255, 255, 255, 0.04);
     color: var(--color-mist-100);
     transition: background 140ms ease, border-color 140ms ease, transform 140ms ease, opacity 140ms ease;
     cursor: pointer;
     white-space: nowrap;
+    text-align: center;
   }
   .btn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.075);
@@ -164,7 +200,7 @@
     background: var(--color-ember-500);
     border-color: var(--color-ember-500);
     color: #20180a;
-    font-weight: 650;
+    font-weight: 600;
   }
   .btn-primary:hover:not(:disabled) {
     background: var(--color-ember-400);
@@ -258,19 +294,51 @@
   }
 
   .skeleton {
-    background: linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.09), rgba(255,255,255,0.04));
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.04));
     background-size: 200% 100%;
     animation: shimmer 1.6s linear infinite;
   }
 }
 
+/* Touch sizing. Desktop keeps its density; small screens get real hit targets. */
+@media (max-width: 640px) {
+  .btn {
+    height: 44px;
+    padding: 0 16px;
+    font-size: 14px;
+  }
+  .btn-sm {
+    height: 40px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+  .field {
+    height: 44px;
+    font-size: 15px;
+  }
+  .segmented button {
+    height: 40px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+  .label {
+    font-size: 12px;
+  }
+}
+
 @keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;

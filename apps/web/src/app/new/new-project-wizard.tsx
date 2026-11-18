@@ -159,7 +159,7 @@ export function NewProjectWizard({ capabilities }: { capabilities: Capabilities 
               onDragLeave={() => setDragging(false)}
               onDrop={onDrop}
               className={cn(
-                "rounded-xl border border-dashed px-5 py-8 text-center transition-colors",
+                "rounded-xl border border-dashed px-4 py-8 text-center transition-colors sm:px-5",
                 dragging ? "border-ember-500/60 bg-ember-500/[0.06]" : "border-white/12 bg-black/20",
               )}
             >
@@ -274,12 +274,12 @@ export function NewProjectWizard({ capabilities }: { capabilities: Capabilities 
           </div>
         ) : null}
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/6 pt-4">
+        <div className="flex flex-col-reverse gap-3 border-t border-white/6 pt-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="flex items-center gap-1.5 text-[11.5px] text-mist-600">
-            <ShieldCheck className="size-3.5" strokeWidth={2} />
+            <ShieldCheck className="size-3.5 shrink-0" strokeWidth={2} />
             Files stay on this machine. Nothing is uploaded to a cloud service.
           </p>
-          <button type="button" className="btn btn-primary" onClick={submit} disabled={!canSubmit}>
+          <button type="button" className="btn btn-primary w-full sm:w-auto" onClick={submit} disabled={!canSubmit}>
             {busy ? <Loader2 className="size-4 animate-spin" strokeWidth={2} /> : null}
             Import and open
           </button>

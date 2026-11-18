@@ -33,28 +33,33 @@ export default async function ProjectsPage() {
 
   return (
     <div className="space-y-8">
-      <section className="relative overflow-hidden rounded-2xl border border-white/8 bg-ink-900/60 px-6 py-8 sm:px-9 sm:py-10">
+      <section className="relative overflow-hidden rounded-2xl border border-white/8 bg-ink-900/70">
         <div
           aria-hidden
-          className="pointer-events-none absolute -right-24 -top-32 size-72 rounded-full bg-ember-500/12 blur-3xl"
+          className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-ember-500/45 to-transparent"
         />
-        <div className="relative max-w-2xl space-y-3">
-          <p className="label">Local-first repurposing studio</p>
-          <h1 className="text-[26px] font-semibold leading-[1.15] text-mist-50 sm:text-[32px]">
-            Find the clips hiding in your long recordings.
-          </h1>
-          <p className="max-w-xl text-[13.5px] leading-relaxed text-mist-400">
-            Import a video, let your machine transcribe it, and review ranked moments with the reasons
-            behind each score. You decide what leaves the cutting room.
-          </p>
-          <div className="flex flex-wrap items-center gap-2 pt-2">
-            <Link href="/new" className="btn btn-primary">
-              <Film className="size-4" strokeWidth={2} />
-              Import a video
-            </Link>
-            <Link href="/templates" className="btn">
-              Browse templates
-            </Link>
+        <div className="px-5 py-7 sm:px-9 sm:py-10">
+          <div className="max-w-2xl space-y-3">
+            <p className="label">Runs on your machine</p>
+            <h1 className="text-[27px] font-semibold leading-[1.14] text-mist-50 sm:text-[33px]">
+              Find the clips hiding in your long recordings.
+            </h1>
+            <p className="max-w-xl text-[13.5px] leading-relaxed text-mist-400 sm:text-[14px]">
+              Import a recording. Your machine transcribes it and ranks the moments worth keeping — with
+              the reason behind every score.
+            </p>
+            <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:items-center">
+              <Link href="/new" className="btn btn-primary w-full sm:w-auto">
+                <Film className="size-4" strokeWidth={2} />
+                Import a video
+              </Link>
+              <Link href="/templates" className="btn w-full sm:w-auto">
+                Browse templates
+              </Link>
+            </div>
+            <p className="pt-1 font-mono text-[11px] tracking-[0.02em] text-mist-600">
+              no account · no upload queue · no cloud
+            </p>
           </div>
         </div>
       </section>
@@ -165,8 +170,12 @@ function ProjectCard({ project }: { project: Project }) {
   return (
     <Link
       href={`/projects/${project.id}`}
-      className="group surface-raised flex flex-col gap-3 p-4 transition-colors hover:border-white/15"
+      className="group surface-raised relative flex min-w-0 flex-col gap-3 p-4 transition-[border-color,box-shadow] duration-150 hover:border-white/16 hover:shadow-[0_1px_0_rgba(255,255,255,0.06)_inset,0_26px_48px_-30px_rgba(0,0,0,1)]"
     >
+      <span
+        aria-hidden
+        className="absolute inset-x-3 top-0 h-px bg-transparent transition-colors duration-150 group-hover:bg-ember-500/40"
+      />
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-[14px] font-medium text-mist-50">{project.name}</p>
