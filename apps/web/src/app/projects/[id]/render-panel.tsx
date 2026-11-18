@@ -430,7 +430,7 @@ export function RenderPanel({
                 data-active={captionPosition === position.id}
                 aria-pressed={captionPosition === position.id}
                 onClick={() => setCaptionPosition(position.id)}
-                disabled={!captions}
+                disabled={captionControlsDisabled}
               >
                 {position.label}
               </button>
@@ -449,7 +449,7 @@ export function RenderPanel({
                   data-active={captionAlignment === alignment.id}
                   aria-pressed={captionAlignment === alignment.id}
                   onClick={() => setCaptionAlignment(alignment.id)}
-                  disabled={!captions}
+                  disabled={captionControlsDisabled}
                 >
                   {alignment.label}
                 </button>
@@ -470,7 +470,7 @@ export function RenderPanel({
                 value={captionMarginV}
                 onChange={(event) => setCaptionMarginV(Number(event.target.value))}
                 className="w-full accent-ember-500"
-                disabled={!captions}
+                disabled={captionControlsDisabled}
               />
               <span className="block text-[10.5px] leading-relaxed text-mist-600">
                 The export keeps captions above the platform-safe bottom edge.
