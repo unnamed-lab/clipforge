@@ -7,6 +7,7 @@ from clipforge.db.connection import Database, utc_now
 from clipforge.db.util import loads as _loads
 from clipforge.db.util import new_id, row_dict as _row
 from clipforge.errors import Conflict, NotFound
+from clipforge.packaging.models import PackagingDocument
 
 _UNSET: Any = object()
 
@@ -291,6 +292,14 @@ class AnalysisRunRepository:
 # ----------------------------------------------------------------------- candidates
 
 
+def serialise_packaging(raw: dict | None) -> dict:
+    """Restore defaults for rows written before newer document fields existed."""
+    try:
+        return PackagingDocument.model_validate(raw or {}).model_dump()
+    except ValueError:
+        return PackagingDocument().model_dump()
+
+
 def serialise_candidate(row: dict) -> dict:
     data = dict(row)
     data["scores"] = _loads(data.pop("scores_json"), {})
@@ -307,7 +316,7 @@ def serialise_candidate(row: dict) -> dict:
     data["boundary"] = boundary
     data["editorial"] = _loads(data.pop("editorial_json", None), {}) or {}
     data["duration"] = _loads(data.pop("duration_json", None), {}) or {}
-    data["packaging"] = _loads(data.pop("packaging_json", None), {}) or {}
+    data["packaging"] = serialise_packaging(_loads(data.pop("packaging_json", None), {}))
     data["summary"] = data.get("summary") or ""
     data["start_ms"] = data.get("user_start_ms") if data.get("user_start_ms") is not None else data["start_ms"]
     data["end_ms"] = data.get("user_end_ms") if data.get("user_end_ms") is not None else data["end_ms"]

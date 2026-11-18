@@ -5,7 +5,7 @@ from __future__ import annotations
 from clipforge.db.repositories import serialise_candidate
 
 
-def _row(boundary_json: str | None) -> dict:
+def _row(boundary_json: str | None, packaging_json: str | None = None) -> dict:
     return {
         "id": "candidate-1",
         "start_ms": 0,
@@ -16,6 +16,7 @@ def _row(boundary_json: str | None) -> dict:
         "hook_json": "{}",
         "brief_json": "{}",
         "boundary_json": boundary_json,
+        "packaging_json": packaging_json,
     }
 
 
@@ -53,3 +54,28 @@ def test_candidate_with_a_reviewed_boundary_keeps_its_evidence():
     # then
     assert candidate["boundary"]["evidence"] == ["Speech continues after the end."]
     assert candidate["boundary"]["suspicious"] is True
+
+
+def test_candidate_without_stored_packaging_returns_schema_defaults():
+    # given a row written before packaging existed
+    row = _row(None, packaging_json=None)
+
+    # when
+    candidate = serialise_candidate(row)
+
+    # then
+    assert candidate["packaging"]["saved_trends"] == []
+    assert candidate["packaging"]["dismissed_trend_ids"] == []
+    assert candidate["packaging"]["manual_trends"] == []
+
+
+def test_candidate_with_legacy_packaging_returns_newer_list_fields():
+    # given a document stored before saved trends existed
+    row = _row(None, packaging_json='{"platform": "tiktok", "metadata": {"titles": []}}')
+
+    # when
+    candidate = serialise_candidate(row)
+
+    # then
+    assert candidate["packaging"]["platform"] == "tiktok"
+    assert candidate["packaging"]["saved_trends"] == []

@@ -70,8 +70,23 @@ function emptyDocument(): PackagingDocument {
   };
 }
 
+function normaliseDocument(stored: PackagingDocument | null | undefined): PackagingDocument {
+  if (!stored) return emptyDocument();
+  // Persisted documents can predate fields the panel renders; fill the gaps here
+  // so an older candidate cannot crash the workspace.
+  return {
+    ...emptyDocument(),
+    ...stored,
+    settings: stored.settings ?? {},
+    dismissed_trend_ids: stored.dismissed_trend_ids ?? [],
+    saved_trends: stored.saved_trends ?? [],
+    manual_trends: stored.manual_trends ?? [],
+    warnings: stored.warnings ?? [],
+  };
+}
+
 function documentFor(candidate: Candidate): PackagingDocument {
-  return candidate.packaging ?? emptyDocument();
+  return normaliseDocument(candidate.packaging);
 }
 
 function text(value: unknown, fallback = ""): string {
@@ -160,10 +175,11 @@ export function PackagingPanel({
   }
 
   function applyResponse(response: { candidate: Candidate; packaging: PackagingDocument }) {
-    setDocument(response.packaging);
-    setDraft(response.packaging.metadata ?? null);
-    setPlatform((response.packaging.platform as PlatformId) || "cross_platform");
-    setSettings(response.packaging.settings ?? {});
+    const packaging = normaliseDocument(response.packaging);
+    setDocument(packaging);
+    setDraft(packaging.metadata ?? null);
+    setPlatform((packaging.platform as PlatformId) || "cross_platform");
+    setSettings(packaging.settings ?? {});
     onCandidate(response.candidate);
   }
 
