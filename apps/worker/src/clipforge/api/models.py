@@ -88,12 +88,24 @@ class PackagingGenerateBody(BaseModel):
     check_trend: bool = False
     force_trend: bool = False
     settings: dict | None = None
+    fields: list[
+        Literal["titles", "description", "caption", "hashtags", "keywords", "thumbnail", "cta", "all"]
+    ] = Field(default_factory=list, max_length=8)
+    title_angle: str | None = Field(default=None, max_length=40)
+    more_titles: int = Field(default=0, ge=0, le=3)
+    research_mode: Literal["off", "free", "enhanced"] = "off"
+    manual_terms: list[str] = Field(default_factory=list, max_length=12)
+    reuse_brief: bool = True
+    edited_fields: list[str] = Field(default_factory=list, max_length=12)
+    force_fields: list[str] = Field(default_factory=list, max_length=12)
+    metadata: dict | None = None
 
 
 class PackagingPatchBody(BaseModel):
     platform: Literal["tiktok", "youtube_shorts", "instagram_reels", "cross_platform"] | None = None
     metadata: dict | None = None
     settings: dict | None = None
+    edited_fields: list[str] = Field(default_factory=list, max_length=12)
     trend_action: Literal["use", "dismiss", "restore", "save", "manual"] | None = None
     trend_id: str | None = Field(default=None, max_length=160)
     regenerate_with_trend: bool = False

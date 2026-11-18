@@ -201,6 +201,40 @@ export const packagingTitleSchema = z
     limit: z.number().default(0),
     within_limit: z.boolean().default(true),
     basis: z.enum(["transcript", "hook", "topic", "profile"]).default("transcript"),
+    angle: z
+      .enum([
+        "descriptive",
+        "insight",
+        "problem_solution",
+        "question",
+        "benefit",
+        "contrarian",
+        "story",
+        "search",
+        "quote",
+        "curiosity",
+        "result",
+        "how_to",
+        "direct",
+      ])
+      .default("direct"),
+    evidence_ids: z.array(z.string()).default([]),
+    limitations: z.array(z.string()).default([]),
+    scores: z
+      .object({
+        accuracy: z.number().default(0),
+        specificity: z.number().default(0),
+        audience_relevance: z.number().default(0),
+        curiosity: z.number().default(0),
+        search_relevance: z.number().default(0),
+        readability: z.number().default(0),
+        weighted: z.number().default(0),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    accepted: z.boolean().default(true),
+    rejection_reason: z.string().default(""),
   })
   .passthrough();
 export type PackagingTitle = z.infer<typeof packagingTitleSchema>;
@@ -242,6 +276,93 @@ export const packagingProvenanceSchema = z
   })
   .passthrough();
 export type PackagingProvenance = z.infer<typeof packagingProvenanceSchema>;
+
+export const packagingBriefEvidenceSchema = z
+  .object({
+    id: z.string(),
+    text: z.string().default(""),
+    start_ms: z.number().default(0),
+    end_ms: z.number().default(0),
+    kind: z.enum(["claim", "example", "caveat", "hook", "context", "section"]).default("claim"),
+    section_id: z.string().nullable().optional(),
+    sentence_id: z.number().nullable().optional(),
+    in_clip: z.boolean().default(true),
+  })
+  .passthrough();
+export type PackagingBriefEvidence = z.infer<typeof packagingBriefEvidenceSchema>;
+
+export const packagingBriefSchema = z
+  .object({
+    version: z.string().default(""),
+    method: z.enum(["deterministic", "llm"]).default("deterministic"),
+    brief_key: z.string().default(""),
+    clip_type: z.string().default("unknown"),
+    subject: z.string().default(""),
+    video_topic: z.string().default(""),
+    clip_topic: z.string().default(""),
+    central_claim: z.string().default(""),
+    key_insight: z.string().default(""),
+    audience_problem: z.string().default(""),
+    practical_takeaway: z.string().default(""),
+    supporting_points: z.array(z.string()).default([]),
+    example_evidence: z.array(z.string()).default([]),
+    caveats: z.array(z.string()).default([]),
+    stronger_hook: z.string().default(""),
+    hook_evidence_id: z.string().nullable().optional(),
+    entities: z.array(z.string()).default([]),
+    search_concepts: z.array(z.string()).default([]),
+    minor_topics: z.array(z.string()).default([]),
+    wider_context: z.array(z.string()).default([]),
+    evidence: z.array(packagingBriefEvidenceSchema).default([]),
+    sections: z.array(z.record(z.string(), z.unknown())).default([]),
+    source_title: z.string().nullable().optional(),
+    source_description: z.string().nullable().optional(),
+    confidence: z.enum(["high", "medium", "low"]).default("medium"),
+    ambiguity: z.array(z.string()).default([]),
+    warnings: z.array(z.string()).default([]),
+    context_chars: z.number().default(0),
+    omitted_sections: z.number().default(0),
+    truncated: z.boolean().default(false),
+  })
+  .passthrough();
+export type PackagingBrief = z.infer<typeof packagingBriefSchema>;
+
+export const keywordObservationSchema = z
+  .object({
+    id: z.string(),
+    term: z.string(),
+    provider: z.string(),
+    kind: z.enum(["suggestion", "relative_interest", "public_video", "manual", "ai_hypothesis"]).default("suggestion"),
+    value: z.number().nullable().optional(),
+    unit: z.string().default(""),
+    region: z.string().default(""),
+    language: z.string().default(""),
+    retrieved_at: z.string().default(""),
+    freshness: z.enum(["fresh", "recent", "stale", "unknown"]).default("unknown"),
+    source_url: z.string().nullable().optional(),
+    evidence: z.string().default(""),
+    limitations: z.array(z.string()).default([]),
+    confidence: z.enum(["low", "medium", "high"]).default("low"),
+    manual: z.boolean().default(false),
+  })
+  .passthrough();
+export type KeywordObservation = z.infer<typeof keywordObservationSchema>;
+
+export const keywordResearchSchema = z
+  .object({
+    mode: z.enum(["off", "free", "enhanced"]).default("off"),
+    status: z.string().default("disabled"),
+    retrieved_at: z.string().default(""),
+    providers: z.array(z.record(z.string(), z.unknown())).default([]),
+    observations: z.array(keywordObservationSchema).default([]),
+    suggested_terms: z.array(z.string()).default([]),
+    terms_used: z.array(z.string()).default([]),
+    notes: z.array(z.string()).default([]),
+    limitations: z.array(z.string()).default([]),
+    cached: z.boolean().default(false),
+  })
+  .passthrough();
+export type KeywordResearch = z.infer<typeof keywordResearchSchema>;
 
 export const clipMetadataSchema = z
   .object({
@@ -296,6 +417,14 @@ export const clipMetadataSchema = z
       .passthrough()
       .nullable()
       .optional(),
+    thumbnail_alternatives: z.array(z.string()).default([]),
+    content_angle: z.string().default(""),
+    key_takeaway: z.string().default(""),
+    suggested_audience: z.string().default(""),
+    source_hook: z.string().default(""),
+    source_hook_start_ms: z.number().default(0),
+    editorial_rationale: z.string().default(""),
+    context_warnings: z.array(z.string()).default([]),
     validation: z
       .object({
         ok: z.boolean().default(true),
@@ -392,11 +521,16 @@ export type TrendCheckResult = z.infer<typeof trendCheckResultSchema>;
 
 export const packagingDocumentSchema = z
   .object({
-    version: z.number().default(1),
+    version: z.number().default(2),
     platform: z.string().default("cross_platform"),
     metadata: clipMetadataSchema.nullable().optional(),
+    brief: packagingBriefSchema.nullable().optional(),
+    research: keywordResearchSchema.nullable().optional(),
     trend: trendCheckResultSchema.nullable().optional(),
     settings: z.record(z.string(), z.unknown()).default({}),
+    edited_fields: z.array(z.string()).default([]),
+    skill_version: z.string().default(""),
+    brief_meta: z.record(z.string(), z.unknown()).default({}),
     dismissed_trend_ids: z.array(z.string()).default([]),
     saved_trends: z.array(trendRecommendationSchema).default([]),
     manual_trends: z.array(z.record(z.string(), z.unknown())).default([]),
@@ -412,6 +546,9 @@ export const packagingConfigSchema = z
     provenance: z.record(z.string(), z.string()).default({}),
     platforms: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
     providers: z.record(z.string(), z.unknown()).default({}),
+    research: z.record(z.string(), z.unknown()).default({}),
+    skill: z.record(z.string(), z.unknown()).default({}),
+    title_weights: z.record(z.string(), z.number()).default({}),
     trend_weights: z.record(z.string(), z.number()).default({}),
     notes: z.array(z.string()).default([]),
   })

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from clipforge.packaging.models import (
     ClipMetadata,
@@ -25,8 +26,12 @@ from clipforge.packaging.models import (
 )
 from clipforge.platforms import packaging_profile, packaging_profiles
 
+if TYPE_CHECKING:
+    from clipforge.packaging.models import ContentBrief, KeywordResearchResult
+
 STOPWORDS = {
-    "a", "about", "actually", "after", "again", "all", "already", "also", "am", "an", "and", "any",
+    "a", "about", "actually", "after", "again", "all", "already", "also", "always",
+    "finally", "instead", "am", "an", "and", "any",
     "are", "as", "at", "back", "be", "because", "become", "becomes", "been", "before", "behind",
     "being", "best", "better", "biggest", "but", "by", "can", "could", "did", "different", "do",
     "does", "doing", "done", "down", "easy", "even", "ever", "every", "expensive", "first", "for",
@@ -99,6 +104,8 @@ class PackagingContext:
     topic: str = ""
     subtopics: list[str] = field(default_factory=list)
     banned_terms: list[str] = field(default_factory=list)
+    source_title: str = ""
+    source_description: str = ""
     now: datetime | None = None
 
 
@@ -394,7 +401,12 @@ def _hashtag(value: str) -> str:
     return f"#{cleaned}" if cleaned else ""
 
 
-def _hashtags(context: PackagingContext, text: ClipText, topic: str) -> list[HashtagSuggestion]:
+def _hashtags(
+    context: PackagingContext,
+    text: ClipText,
+    topic: str,
+    research: "KeywordResearchResult | None" = None,
+) -> list[HashtagSuggestion]:
     profile = packaging_profile(context.platform)
     style = str(context.settings.get("hashtag_style") or "balanced")
     count = {
@@ -438,6 +450,25 @@ def _hashtags(context: PackagingContext, text: ClipText, topic: str) -> list[Has
     add(topic, "niche", f"Named topic/niche supplied for this project: {topic}.", "profile", 0.95)
     for subtopic in context.subtopics[:3]:
         add(subtopic, "topic", f"Named subtopic supplied for this project: {subtopic}.", "profile", 0.85)
+    if research is not None:
+        added = 0
+        for observation in research.observations:
+            if added >= 2:
+                break
+            if observation.kind not in {"suggestion", "relative_interest", "manual"}:
+                continue
+            if observation.kind == "relative_interest" and observation.value is None:
+                continue
+            if len(observation.term.split()) > 3:
+                continue
+            if add(
+                observation.term,
+                "topic",
+                f"Research wording from {observation.provider}; not evidence of popularity or volume.",
+                "trend",
+                0.8,
+            ):
+                added += 1
     transcript_budget = {"minimal": 0, "balanced": 2, "descriptive": 3}.get(style, 2)
     transcript_tags = 0
     for term, occurrences in _term_counts(text.full_text):
@@ -463,20 +494,65 @@ def _hashtags(context: PackagingContext, text: ClipText, topic: str) -> list[Has
     return suggestions[:target]
 
 
-def _keywords(context: PackagingContext, text: ClipText, topic: str, titles: list[TitleVariant]) -> list[SearchKeyword]:
+GENERIC_SINGLE_WORDS = {
+    "business", "company", "customer", "customers", "founder", "founders", "hire",
+    "hiring", "idea", "lesson", "lessons", "mistake", "mistakes", "people", "problem",
+    "start", "talk", "thing", "things", "time", "work",
+}
+
+
+def _keyword_phrase(value: str) -> str | None:
+    """Return a clean search phrase, or ``None`` for sentence-like text."""
+    text = re.sub(r"\s+", " ", _clean(value or "")).strip(" .,;:!?\"'“”‘’()[]")
+    if not text or len(text) > 80:
+        return None
+    # Full sentences, quoted speech and label-style text are not search phrases.
+    if re.search(r"[.;:!?\"()\[\]]", text):
+        return None
+    words = text.split()
+    if not 1 <= len(words) <= 5:
+        return None
+    if words[0].lower() in STOPWORDS or words[-1].lower() in STOPWORDS:
+        return None
+    if len(words) == 1:
+        word = words[0]
+        # A lone common word is not a phrase; only a short acronym such as an
+        # API name survives, because it is genuinely how people search for it.
+        if not (word.isalpha() and word.isupper() and 2 <= len(word) <= 6):
+            return None
+        if word.lower() in GENERIC_SINGLE_WORDS:
+            return None
+    content = [
+        word
+        for word in words
+        if re.sub(r"[^a-z0-9]", "", word.lower())
+        and re.sub(r"[^a-z0-9]", "", word.lower()) not in STOPWORDS
+    ]
+    if not content:
+        return None
+    return text
+
+
+def _keywords(
+    context: PackagingContext,
+    text: ClipText,
+    topic: str,
+    brief: "ContentBrief | None" = None,
+    research: "KeywordResearchResult | None" = None,
+) -> list[SearchKeyword]:
     profile = packaging_profile(context.platform)
     limit = _int_value(profile.get("keyword_max"), 10)
     keywords: list[SearchKeyword] = []
-    seen: set[str] = set()
+    seen: list[str] = []
 
     def add(phrase: str, reason: str) -> None:
-        value = _clean(phrase).strip("#")
-        if len(value) < 3 or len(value) > 80:
+        value = _keyword_phrase(phrase)
+        if value is None:
             return
         key = value.lower()
-        if key in seen:
+        if any(key == existing or key in existing or existing in key for existing in seen):
             return
-        seen.add(key)
+        seen.append(key)
         keywords.append(
             SearchKeyword(
                 phrase=value,
@@ -486,14 +562,29 @@ def _keywords(context: PackagingContext, text: ClipText, topic: str, titles: lis
             )
         )
 
+    add(topic, "Project topic used as the primary search phrase.")
     genre = GENRE_LABELS.get(context.genre, "")
-    add(f"{topic} {genre}".strip(), "Natural-language phrase combining the project topic and genre.")
-    if titles:
-        add(titles[0].text.rstrip("."), "Phrase taken from the strongest grounded title.")
-    for sentence in text.sentences[:3]:
-        phrase = _trim(sentence.text, 90).rstrip(".")
-        if len(phrase.split()) >= 3:
-            add(phrase, "Phrase spoken in the final clip.")
+    add(f"{topic} {genre}".strip(), "Project topic combined with the clip genre.")
+    if brief is not None:
+        # A brief supplies concepts and entities, not whole spoken sentences.
+        add(brief.clip_topic, "Topic phrase identified in the selected clip.")
+        for concept in brief.search_concepts[:6]:
+            add(concept, "Topic concept identified in the selected clip.")
+        for entity in brief.entities[:3]:
+            add(entity, "Named entity that appears in the selected clip.")
+    else:
+        for sentence in text.sentences[:3]:
+            add(_trim(sentence.text, 90), "Phrase spoken in the final clip.")
+    if research is not None:
+        for observation in research.observations:
+            if observation.kind not in {"suggestion", "relative_interest", "manual"}:
+                continue
+            if observation.kind == "relative_interest" and observation.value is None:
+                continue
+            add(
+                observation.term,
+                f"Research wording from {observation.provider}. It is not a verified search volume.",
+            )
     return keywords[:limit]
 
 
@@ -681,6 +772,32 @@ def _validate(
             else:
                 issues.append(f"Unverifiable promotional language appears in metadata: {claim}")
 
+    allowed_nouns = {
+        "the", "this", "that", "these", "those", "how", "why", "what", "when", "where", "who",
+        "clip", "lesson", "real", "problem", "fix", "part", "most", "title", "short", "full",
+        "youtube", "tiktok", "instagram", "reels", "shorts", "clipforge", "ai",
+        "follow", "tell", "find", "watch", "listen", "comment", "share", "save", "subscribe",
+        "learn", "read", "try", "check", "link", "profile", "more", "discover", "download",
+        "tap", "click", "get", "join", "see", "grab", "new", "one", "here", "there",
+        *(str(value).lower() for value in context.settings.get("brand_terms") or []),
+        *(str(value).lower() for value in context.subtopics),
+    }
+    for token in re.findall(r"\b[A-Z][a-z]{2,}\b", generated_text):
+        if token.lower() in allowed_nouns:
+            continue
+        if token.lower() not in source_lower:
+            issues.append(f"Name '{token}' in generated metadata is not present in the clip transcript or supplied topic.")
+
+    opening = text.sentences[0].text.strip().lower() if text.sentences else ""
+    if opening and len(text.sentences) > 1:
+        if metadata.descriptions.short.strip().lower() == opening:
+            warnings.append("The short description repeats the clip's opening sentence; consider explaining the point instead.")
+    if metadata.descriptions.short.strip() and metadata.descriptions.short.strip() in {
+        metadata.titles[0].text.strip() if metadata.titles else "",
+        metadata.caption.text.strip(),
+    }:
+        warnings.append("The same text is reused across fields; each field should serve a different purpose.")
+
     if not topic:
         warnings.append("No topic or niche was supplied; hashtags use transcript terms only.")
     warnings.append("Search keywords are AI-generated and are not verified platform search data.")
@@ -692,7 +809,13 @@ def _validate(
     )
 
 
-def generate_metadata(context: PackagingContext) -> ClipMetadata:
+def generate_metadata(
+    context: PackagingContext,
+    brief: "ContentBrief | None" = None,
+    research: "KeywordResearchResult | None" = None,
+) -> ClipMetadata:
+    from clipforge.packaging import director
+
     platform = context.platform if context.platform in packaging_profiles() else "cross_platform"
     context = PackagingContext(
         transcript=context.transcript,
@@ -704,6 +827,8 @@ def generate_metadata(context: PackagingContext) -> ClipMetadata:
         topic=context.topic,
         subtopics=context.subtopics,
         banned_terms=context.banned_terms,
+        source_title=context.source_title,
+        source_description=context.source_description,
         now=context.now,
     )
     text = clip_text(context.transcript, context.candidate)
@@ -712,17 +837,88 @@ def generate_metadata(context: PackagingContext) -> ClipMetadata:
         hook = ""
     topic = _topic(context, text)
     titles = _title_variants(text, hook, packaging_profile(platform))
-    hashtags = _hashtags(context, text, topic)
-    keywords = _keywords(context, text, topic, titles) if context.settings.get("include_keywords", True) else []
-    cta = _cta(context)
+    hashtags = _hashtags(context, text, topic, research)
     descriptions = _description(text, hashtags)
+    thumbnail = _thumbnail(text, hook, platform) if context.settings.get("thumbnail_text", True) else None
+    thumbnail_alternatives: list[str] = []
+    content_angle = ""
+    key_takeaway = ""
+    suggested_audience = ""
+    source_hook = hook
+    source_hook_start = int(context.candidate.get("start_ms") or 0)
+    context_warnings: list[str] = []
+    if brief is not None:
+        brief_titles = director.title_candidates(
+            brief,
+            clip_sentences=[
+                {"text": sentence.text, "start_ms": sentence.start_ms, "end_ms": sentence.end_ms}
+                for sentence in text.sentences
+            ],
+            platform=platform,
+            settings={**context.settings, "platform": platform},
+            research=research,
+        )
+        accepted = [item for item in brief_titles if item.accepted]
+        if accepted:
+            titles = accepted + [item for item in brief_titles if not item.accepted]
+        descriptions = director.descriptions(
+            brief,
+            platform=platform,
+            settings=context.settings,
+            research=research,
+            selected_title=titles[0].text if titles else "",
+        )
+        thumbnails = director.thumbnail_texts(brief, platform=platform)
+        if thumbnails and context.settings.get("thumbnail_text", True):
+            limit = _int_value(packaging_profile(platform).get("thumbnail_text_max"), 40)
+            thumbnail = ThumbnailText(
+                text=_trim(thumbnails[0], limit),
+                limit=limit,
+                within_limit=len(thumbnails[0]) <= limit,
+                reason="Short grounded phrase from the clip's strongest idea.",
+            )
+            thumbnail_alternatives = [_trim(value, limit) for value in thumbnails[1:]]
+        content_angle = director.content_angle(brief, titles)
+        key_takeaway = _clean(brief.practical_takeaway or brief.key_insight)[:320]
+        suggested_audience = _clean(str(context.settings.get("audience") or ""))[:160]
+        source_hook = brief.stronger_hook or hook
+        hook_evidence = next(
+            (item for item in brief.evidence if item.id == brief.hook_evidence_id),
+            None,
+        )
+        if hook_evidence:
+            source_hook_start = hook_evidence.start_ms
+        context_warnings = [*brief.ambiguity, *brief.warnings]
+    keywords = (
+        _keywords(context, text, topic, brief, research)
+        if context.settings.get("include_keywords", True)
+        else []
+    )
+    cta = _cta(context)
     captions = [
         _caption(name, text, hook, topic, hashtags, cta)
         for name in packaging_profiles()
     ]
     caption = next((item for item in captions if item.platform == platform), captions[0])
-    thumbnail = _thumbnail(text, hook, platform) if context.settings.get("thumbnail_text", True) else None
     now = (context.now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    grounding = [
+        "Titles, descriptions and captions use transcript evidence from the final clip.",
+        "Hashtags use the project topic, profile terms, genre and transcript terms.",
+        "No search volume, ranking or growth figure is generated locally.",
+    ]
+    if brief is not None:
+        grounding.insert(
+            0,
+            f"The packaging director used a {brief.version} brief covering {len(brief.sections)} source sections "
+            f"({brief.omitted_sections} omitted from the prompt).",
+        )
+        if brief.wider_context:
+            grounding.append("Wider-context material is labelled and never presented as clip content.")
+    if research is not None and research.mode != "off":
+        grounding.append(
+            f"Research mode {research.mode} used {len(research.observations)} observations; "
+            "no metric was generated by Clipforge."
+        )
     metadata = ClipMetadata(
         titles=titles,
         descriptions=descriptions,
@@ -732,6 +928,14 @@ def generate_metadata(context: PackagingContext) -> ClipMetadata:
         keywords=keywords,
         cta=cta,
         thumbnail_text=thumbnail,
+        thumbnail_alternatives=thumbnail_alternatives,
+        content_angle=content_angle,
+        key_takeaway=key_takeaway,
+        suggested_audience=suggested_audience,
+        source_hook=source_hook,
+        source_hook_start_ms=source_hook_start,
+        editorial_rationale=titles[0].reason if titles else "",
+        context_warnings=list(dict.fromkeys(context_warnings)),
         provenance=PackagingProvenance(
             generated_at=now.isoformat(),
             method="deterministic",
@@ -741,11 +945,7 @@ def generate_metadata(context: PackagingContext) -> ClipMetadata:
             source_end_ms=text.source_end_ms,
             timeline_applied=text.timeline_applied,
             sentence_ids=text.sentence_ids,
-            grounding=[
-                "Titles, descriptions and captions use transcript sentences from the final clip.",
-                "Hashtags use the project topic, profile terms, genre and transcript terms.",
-                "No search volume, ranking or growth figure is generated locally.",
-            ],
+            grounding=grounding,
             warnings=list(text.warnings),
         ),
     )

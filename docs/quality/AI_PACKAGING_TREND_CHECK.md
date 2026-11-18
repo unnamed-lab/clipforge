@@ -7,6 +7,11 @@ existing analysis, editorial and FFmpeg render pipeline. This document records
 what is implemented, which sources were verified, what needs credentials or
 approval, what is mocked in tests, and what remains unavailable.
 
+> For the context-aware packaging pipeline (whole-video content briefs, title
+> direction, grounded keywords and the research layer), see
+> `AI_PACKAGING_INTELLIGENCE.md`. That document supersedes the packaging
+> sections here; the trend check sections remain current.
+
 ## 1. Non-goals and boundaries
 
 - Packaging is metadata only. Generating or editing it never re-transcribes,

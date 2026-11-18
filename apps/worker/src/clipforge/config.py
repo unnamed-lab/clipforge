@@ -62,6 +62,10 @@ class Settings:
     llm_api_key: str
     llm_timeout_seconds: int
     youtube_api_key: str = ""
+    youtube_suggest_enabled: bool = False
+    trends_endpoint: str = ""
+    trends_api_key: str = ""
+    vidiq_enabled: bool = False
     twitch_client_id: str = ""
     twitch_client_secret: str = ""
     trend_cache_ttl_seconds: int = 21_600
@@ -147,6 +151,10 @@ def load_settings() -> Settings:
         llm_api_key=os.environ.get("CLIPFORGE_LLM_API_KEY", "").strip(),
         llm_timeout_seconds=_env_int("CLIPFORGE_LLM_TIMEOUT_SECONDS", 60),
         youtube_api_key=os.environ.get("CLIPFORGE_YOUTUBE_API_KEY", "").strip(),
+        youtube_suggest_enabled=_env_bool("CLIPFORGE_YOUTUBE_SUGGEST_ENABLED", False),
+        trends_endpoint=os.environ.get("CLIPFORGE_TRENDS_ENDPOINT", "").strip(),
+        trends_api_key=os.environ.get("CLIPFORGE_TRENDS_API_KEY", "").strip(),
+        vidiq_enabled=_env_bool("CLIPFORGE_VIDIQ_ENABLED", False),
         twitch_client_id=os.environ.get("CLIPFORGE_TWITCH_CLIENT_ID", "").strip(),
         twitch_client_secret=os.environ.get("CLIPFORGE_TWITCH_CLIENT_SECRET", "").strip(),
         trend_cache_ttl_seconds=_env_int("CLIPFORGE_TREND_CACHE_TTL_SECONDS", 21_600),

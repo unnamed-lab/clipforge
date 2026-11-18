@@ -9,6 +9,7 @@ from clipforge.api.deps import get_state
 from clipforge.api.models import PackagingGenerateBody, PackagingPatchBody, TrendCheckBody
 from clipforge.briefs.spec import ClippingBrief
 from clipforge.errors import NotFound, ValidationFailed
+from clipforge.packaging.brief import brief_key, build_content_brief
 from clipforge.packaging.generator import (
     PackagingContext,
     _hashtag,
@@ -25,6 +26,8 @@ from clipforge.packaging.models import (
     PackagingDocument,
     TrendRecommendation,
 )
+from clipforge.packaging.research.service import KeywordResearchService, build_research_registry
+from clipforge.packaging.skill import SKILL_VERSION, skill_manifest, title_weights
 from clipforge.packaging.trend.base import TrendQuery
 from clipforge.packaging.trend.ranking import merged_weights
 from clipforge.packaging.trend.registry import build_trend_provider_registry
@@ -72,10 +75,42 @@ def _rules(state, project: dict) -> dict:
     return rules
 
 
+def _source_meta(state, project: dict) -> tuple[str, str]:
+    title = ""
+    description = ""
+    source_id = project.get("library_source_id")
+    if source_id:
+        try:
+            row = state.repos.library.get(source_id)
+        except Exception:  # noqa: BLE001 - optional provenance must never block packaging
+            row = None
+        if row:
+            title = str(row.get("title") or "")
+            description = str(row.get("description") or "")
+    goals = project.get("goals") or {}
+    title = title or str(goals.get("source_title") or "")
+    description = description or str(goals.get("source_description") or "")
+    return title[:300], description[:1000]
+
+
+def _brief(state, project: dict, candidate: dict, *, settings: dict, platform: str):
+    transcript = state.repos.transcripts.latest(project["id"]) or {}
+    title, description = _source_meta(state, project)
+    return build_content_brief(
+        transcript,
+        candidate,
+        source_title=title or str(project.get("name") or ""),
+        source_description=description or None,
+        settings=settings,
+        platform=platform,
+    )
+
+
 def _context(state, project: dict, candidate: dict, *, platform: str, settings: dict, genre: str, strategy: str,
              topic: str = "", subtopics: list[str] | None = None) -> PackagingContext:
     transcript = state.repos.transcripts.latest(project["id"]) or {}
     rules = _rules(state, project)
+    title, description = _source_meta(state, project)
     return PackagingContext(
         transcript=transcript,
         candidate=candidate,
@@ -86,6 +121,8 @@ def _context(state, project: dict, candidate: dict, *, platform: str, settings: 
         topic=topic,
         subtopics=list(subtopics or []),
         banned_terms=list(rules.get("banned_terms") or []),
+        source_title=title,
+        source_description=description,
     )
 
 
@@ -114,6 +151,76 @@ def _save(state, project_id: str, candidate_id: str, document: PackagingDocument
 def _trend_service(state) -> TrendService:
     registry = build_trend_provider_registry(state.settings)
     return TrendService(cache=state.repos.trend_cache, registry=registry, settings=state.settings)
+
+
+def _research_service(state) -> KeywordResearchService:
+    trend_registry = build_trend_provider_registry(state.settings)
+    registry = build_research_registry(state.settings, trend_registry.get("youtube"))
+    return KeywordResearchService(
+        cache=state.repos.trend_cache,
+        registry=registry,
+        settings=state.settings,
+    )
+
+
+EDITABLE_FIELDS = ("titles", "description", "caption", "hashtags", "keywords", "thumbnail", "cta")
+
+
+def _detect_edited_fields(existing: ClipMetadata, updated: ClipMetadata) -> list[str]:
+    changed: list[str] = []
+    if [item.text for item in existing.titles] != [item.text for item in updated.titles]:
+        changed.append("titles")
+    if existing.descriptions.model_dump() != updated.descriptions.model_dump():
+        changed.append("description")
+    if existing.caption.text != updated.caption.text:
+        changed.append("caption")
+    if [item.tag for item in existing.hashtags] != [item.tag for item in updated.hashtags]:
+        changed.append("hashtags")
+    if [item.phrase for item in existing.keywords] != [item.phrase for item in updated.keywords]:
+        changed.append("keywords")
+    if (existing.thumbnail_text.text if existing.thumbnail_text else "") != (
+        updated.thumbnail_text.text if updated.thumbnail_text else ""
+    ):
+        changed.append("thumbnail")
+    if (existing.cta or "") != (updated.cta or ""):
+        changed.append("cta")
+    return changed
+
+
+def _preserve_fields(
+    generated: ClipMetadata,
+    existing: ClipMetadata | None,
+    fields: set[str],
+    *,
+    platform_changed: bool,
+) -> ClipMetadata:
+    """Keep approved field values while allowing other fields to regenerate."""
+    if existing is None or not fields:
+        return generated
+    preserved = generated.model_copy(deep=True)
+    if "titles" in fields and existing.titles:
+        preserved.titles = [item.model_copy(deep=True) for item in existing.titles]
+        preserved.editorial_rationale = existing.editorial_rationale
+    if "description" in fields:
+        preserved.descriptions = existing.descriptions.model_copy(deep=True)
+    if "caption" in fields and not platform_changed:
+        preserved.caption = existing.caption.model_copy(deep=True)
+        preserved.platform_captions = [item.model_copy(deep=True) for item in existing.platform_captions]
+    if "hashtags" in fields:
+        preserved.hashtags = [item.model_copy(deep=True) for item in existing.hashtags]
+    if "keywords" in fields:
+        preserved.keywords = [item.model_copy(deep=True) for item in existing.keywords]
+    if "thumbnail" in fields:
+        preserved.thumbnail_text = (
+            existing.thumbnail_text.model_copy(deep=True) if existing.thumbnail_text else None
+        )
+        preserved.thumbnail_alternatives = list(existing.thumbnail_alternatives)
+    if "cta" in fields:
+        preserved.cta = existing.cta
+    preserved.validation.warnings.append(
+        "Approved fields were preserved; regenerate a specific field to replace it."
+    )
+    return preserved
 
 
 def _query(
@@ -243,36 +350,113 @@ def generate_packaging(
     platform = payload.platform or str(settings.get("default_platform") or "cross_platform")
     if platform not in packaging_profiles():
         raise ValidationFailed("Unknown packaging platform", code="invalid_platform")
-    brief = _brief_for(state, project)
-    editorial = brief.editorial
+    brief_config = _brief_for(state, project)
+    editorial = brief_config.editorial
     genre = payload.genre or editorial.genre or "auto"
     stored_strategy = str((candidate.get("editorial") or {}).get("strategy") or "")
     strategy = payload.strategy or stored_strategy or editorial.preferred_strategy or "chronological"
     topic = payload.topic or str(settings.get("niche") or "")
+    document = _document(candidate, settings)
+    platform_changed = document.platform != platform
+
+    transcript = state.repos.transcripts.latest(project["id"]) or {}
+    title, description = _source_meta(state, project)
+    cache_key = brief_key(transcript, candidate, source_title=title or str(project.get("name") or ""))
+    if (
+        payload.reuse_brief
+        and document.brief is not None
+        and document.brief.brief_key == cache_key
+    ):
+        brief = document.brief
+        brief_reused = True
+    else:
+        brief = _brief(state, project, candidate, settings=settings, platform=platform)
+        brief_reused = False
+
+    research_mode = payload.research_mode or str(settings.get("research_mode") or "off")
+    research = _research_service(state).research(
+        brief,
+        mode=research_mode,
+        manual_terms=payload.manual_terms,
+        region=str(settings.get("region") or "US"),
+        language=str(settings.get("language") or "en"),
+        force=bool(payload.check_trend and payload.force_trend),
+    )
+
     context = _context(
         state, project, candidate,
         platform=platform, settings=settings, genre=genre, strategy=strategy,
         topic=topic, subtopics=payload.subtopics,
     )
-    metadata = generate_metadata(context)
+    metadata = generate_metadata(context, brief, research)
     warnings: list[str] = []
     if payload.use_llm:
         provider = build_llm_provider(state.settings)
         if provider is None:
             warnings.append("No LLM endpoint is configured; deterministic metadata is shown.")
         else:
-            llm_metadata, llm_warnings = generate_metadata_llm(context, provider)
+            llm_metadata, llm_warnings = generate_metadata_llm(
+                context,
+                provider,
+                brief,
+                research,
+                title_angle=payload.title_angle,
+                more_titles=payload.more_titles,
+            )
             if llm_metadata is not None:
                 metadata = llm_metadata
             else:
                 warnings.extend(llm_warnings)
-    metadata.provenance.warnings.extend(value for value in warnings if value not in metadata.provenance.warnings)
-    metadata.validation.warnings.extend(value for value in warnings if value not in metadata.validation.warnings)
+    if brief_reused:
+        warnings.append("Reused the cached source brief; only packaging was regenerated.")
+    if brief.omitted_sections:
+        warnings.append(
+            f"The brief omitted {brief.omitted_sections} source sections from the prompt; transcript evidence is still available for validation."
+        )
+    if research.mode != "off" and research.status in {"unavailable", "manual_required", "auth_missing", "quota_exhausted", "rate_limited"}:
+        warnings.append(
+            f"Research was {research.status.replace('_', ' ')}; suggestions remain source-based and no metric was invented."
+        )
 
-    document = _document(candidate, settings)
+    explicit_request = bool(payload.fields) and "all" not in payload.fields
+    if explicit_request:
+        requested = {value for value in payload.fields if value in EDITABLE_FIELDS}
+        preserve = set(EDITABLE_FIELDS) - requested
+    else:
+        requested = set(EDITABLE_FIELDS)
+        preserve = (set(document.edited_fields) | set(payload.edited_fields)) - set(payload.force_fields)
+    existing = document.metadata
+    if payload.metadata:
+        try:
+            existing = ClipMetadata.model_validate(payload.metadata)
+        except ValueError as exc:
+            raise ValidationFailed(f"Packaging metadata is not valid: {exc}", code="invalid_metadata") from exc
+    metadata = _preserve_fields(metadata, existing, preserve, platform_changed=platform_changed)
+
+    regenerated = requested - preserve
+    edited_fields = (set(document.edited_fields) | set(payload.edited_fields)) - regenerated
+    edited_fields |= {field for field in payload.force_fields if field in EDITABLE_FIELDS}
+    metadata.provenance.warnings.extend(
+        value for value in warnings if value not in metadata.provenance.warnings
+    )
+    metadata.validation.warnings.extend(
+        value for value in warnings if value not in metadata.validation.warnings
+    )
+
     document.settings = settings
     document.platform = platform
     document.metadata = metadata
+    document.brief = brief
+    document.research = research
+    document.skill_version = SKILL_VERSION
+    document.edited_fields = sorted(field for field in edited_fields if field in EDITABLE_FIELDS)
+    document.brief_meta = {
+        "version": brief.version,
+        "cached": brief_reused,
+        "omitted_sections": brief.omitted_sections,
+        "confidence": brief.confidence,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
     document.warnings = list(dict.fromkeys([*document.warnings, *warnings]))
     trend_mode = str(settings.get("trend_check") or "manual")
     if (payload.check_trend or trend_mode == "automatic") and trend_mode != "disabled":
@@ -315,6 +499,11 @@ def patch_packaging(
             metadata = ClipMetadata.model_validate(payload.metadata)
         except ValueError as exc:
             raise ValidationFailed(f"Packaging metadata is not valid: {exc}", code="invalid_metadata") from exc
+        previous = document.metadata
+        edited = set(document.edited_fields) | set(payload.edited_fields)
+        if previous is not None:
+            edited |= set(_detect_edited_fields(previous, metadata))
+        document.edited_fields = sorted(field for field in edited if field in EDITABLE_FIELDS)
         context = _context(
             state, project, candidate,
             platform=document.platform,
@@ -444,9 +633,13 @@ def packaging_config(project_id: str, request: Request) -> dict:
         "provenance": resolved["provenance"],
         "platforms": packaging_profiles(),
         "providers": service.config(),
+        "research": _research_service(state).config(),
+        "skill": skill_manifest(),
+        "title_weights": title_weights(),
         "trend_weights": merged_weights(),
         "notes": [
             "Metadata limits and provider capabilities are configuration, not live guarantees.",
             "No trend metric is shown unless a recorded provider response supplied it.",
+            "Packaging works without any research provider or API key.",
         ],
     }

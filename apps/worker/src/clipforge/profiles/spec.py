@@ -155,6 +155,9 @@ class PackagingPreferences(BaseModel):
     cta_preference: Literal["auto", "none", "follow", "comment", "link", "custom"] = "auto"
     cta_text: str = Field(default="", max_length=160)
     trend_check: Literal["automatic", "manual", "disabled"] = "manual"
+    research_mode: Literal["off", "free", "enhanced"] = "off"
+    title_style: str = Field(default="", max_length=120)
+    description_style: Literal["auto", "short_form", "long_form"] = "auto"
     include_keywords: bool = True
     thumbnail_text: bool = True
     brand_terms: list[str] = Field(default_factory=list)
