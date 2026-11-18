@@ -624,6 +624,7 @@ export const renderRequestSchema = z.object({
       font_size: z.number(),
       bold: z.boolean(),
       position: z.enum(["bottom", "center", "top"]),
+      alignment: z.enum(["left", "center", "right"]),
       margin_v: z.number(),
       margin_h: z.number(),
       max_line_width_pct: z.number(),

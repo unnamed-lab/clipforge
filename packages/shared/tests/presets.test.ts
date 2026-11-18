@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { CAPTION_FONTS, COMPOSITION_MODES } from "../src/presets";
+import {
+  CAPTION_ALIGNMENTS,
+  CAPTION_FONTS,
+  CAPTION_POSITIONS,
+  COMPOSITION_MODES,
+  DEFAULT_CAPTION_ALIGNMENT,
+  DEFAULT_CAPTION_POSITION,
+  DEFAULT_CAPTION_PRESET,
+} from "../src/presets";
 import { candidateSchema, renderRequestSchema } from "../src/schemas";
 
 describe("composition modes", () => {
@@ -13,6 +21,16 @@ describe("composition modes", () => {
       "split",
       "manual",
     ]);
+  });
+});
+
+describe("caption defaults", () => {
+  it("defaults to Clean podcast at the bottom, centred", () => {
+    expect(DEFAULT_CAPTION_PRESET).toBe("clean");
+    expect(DEFAULT_CAPTION_POSITION).toBe("bottom");
+    expect(DEFAULT_CAPTION_ALIGNMENT).toBe("center");
+    expect(CAPTION_POSITIONS.map((position) => position.id)).toEqual(["bottom", "center", "top"]);
+    expect(CAPTION_ALIGNMENTS.map((alignment) => alignment.id)).toEqual(["left", "center", "right"]);
   });
 });
 

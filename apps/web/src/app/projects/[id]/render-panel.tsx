@@ -1,22 +1,31 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Download, Film, Loader2, Type } from "lucide-react";
 import type { Capabilities, Render } from "@clipforge/shared";
 import {
   ASPECTS,
+  CAPTION_ALIGNMENTS,
   CAPTION_FONTS,
+  CAPTION_POSITIONS,
   CAPTION_PRESETS,
   COMPOSITION_MODES,
+  DEFAULT_CAPTION_ALIGNMENT,
+  DEFAULT_CAPTION_MARGIN_V,
+  DEFAULT_CAPTION_POSITION,
+  DEFAULT_CAPTION_PRESET,
   formatBytes,
   formatDuration,
   formatTimecode,
 } from "@clipforge/shared";
 import { Alert, Badge, EmptyState } from "@/components/ui";
+import { apiJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type AspectId = (typeof ASPECTS)[number]["id"];
 type CaptionPresetId = (typeof CAPTION_PRESETS)[number]["id"];
+type CaptionPositionId = (typeof CAPTION_POSITIONS)[number]["id"];
+type CaptionAlignmentId = (typeof CAPTION_ALIGNMENTS)[number]["id"];
 type CompositionModeId = (typeof COMPOSITION_MODES)[number]["id"];
 
 export function RenderPanel({
@@ -43,12 +52,128 @@ export function RenderPanel({
   const [composition, setComposition] = useState<CompositionModeId>("auto");
   const [cropX, setCropX] = useState(50);
   const [cropY, setCropY] = useState(50);
-  const [captionPreset, setCaptionPreset] = useState<CaptionPresetId>("clean");
+  const [captionPreset, setCaptionPreset] = useState<CaptionPresetId>(DEFAULT_CAPTION_PRESET);
   const [captionFont, setCaptionFont] = useState<string>("Montserrat");
+  const [captionPosition, setCaptionPosition] = useState<CaptionPositionId>(DEFAULT_CAPTION_POSITION);
+  const [captionAlignment, setCaptionAlignment] = useState<CaptionAlignmentId>(DEFAULT_CAPTION_ALIGNMENT);
+  const [captionMarginV, setCaptionMarginV] = useState(DEFAULT_CAPTION_MARGIN_V);
+  const [captionSaveState, setCaptionSaveState] = useState<"loading" | "saving" | "saved" | "error">("loading");
   const [captions, setCaptions] = useState(true);
   const [normalize, setNormalize] = useState(true);
   const [showPreview, setShowPreview] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hydratedRef = useRef(false);
+  const savedSnapshotRef = useRef("");
+
+  const captionSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        preset: captionPreset,
+        position: captionPosition,
+        alignment: captionAlignment,
+        margin_v: captionMarginV,
+      }),
+    [captionPreset, captionPosition, captionAlignment, captionMarginV],
+  );
+  const captionControlsDisabled = !captions || captionSaveState === "loading";
+
+  useEffect(() => {
+    let alive = true;
+    hydratedRef.current = false;
+    apiJson<{
+      resolved?: { captions?: Record<string, unknown> };
+      overrides?: Record<string, unknown>;
+    }>(`/api/projects/${projectId}/settings`)
+      .then((loaded) => {
+        if (!alive) return;
+        const stored = (loaded.resolved?.captions ?? {}) as Record<string, unknown>;
+        const preset =
+          stored.preset === "custom" ||
+          (typeof stored.preset === "string" && CAPTION_PRESETS.some((entry) => entry.id === stored.preset))
+            ? (stored.preset as CaptionPresetId)
+            : DEFAULT_CAPTION_PRESET;
+        const position =
+          stored.position === "top" || stored.position === "center" || stored.position === "bottom"
+            ? stored.position
+            : DEFAULT_CAPTION_POSITION;
+        const alignment =
+          stored.alignment === "left" || stored.alignment === "right" || stored.alignment === "center"
+            ? stored.alignment
+            : DEFAULT_CAPTION_ALIGNMENT;
+        const margin = typeof stored.margin_v === "number" ? stored.margin_v : DEFAULT_CAPTION_MARGIN_V;
+        setCaptionPreset(preset);
+        setCaptionPosition(position);
+        setCaptionAlignment(alignment);
+        setCaptionMarginV(margin);
+        savedSnapshotRef.current = JSON.stringify({
+          preset,
+          position,
+          alignment,
+          margin_v: margin,
+        });
+        hydratedRef.current = true;
+        setCaptionSaveState("saved");
+      })
+      .catch(() => {
+        if (!alive) return;
+        hydratedRef.current = true;
+        savedSnapshotRef.current = JSON.stringify({
+          preset: DEFAULT_CAPTION_PRESET,
+          position: DEFAULT_CAPTION_POSITION,
+          alignment: DEFAULT_CAPTION_ALIGNMENT,
+          margin_v: DEFAULT_CAPTION_MARGIN_V,
+        });
+        setCaptionSaveState("error");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!hydratedRef.current || captionSnapshot === savedSnapshotRef.current) return;
+    setCaptionSaveState("saving");
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const current = await apiJson<{ overrides?: Record<string, unknown> }>(
+            `/api/projects/${projectId}/settings`,
+          );
+          const base = current.overrides ?? {};
+          const existing =
+            typeof base.captions === "object" && base.captions !== null
+              ? (base.captions as Record<string, unknown>)
+              : {};
+          await apiJson(`/api/projects/${projectId}/settings`, {
+            method: "PATCH",
+            body: {
+              overrides: {
+                ...base,
+                captions: {
+                  ...existing,
+                  preset: captionPreset,
+                  position: captionPosition,
+                  alignment: captionAlignment,
+                  margin_v: captionMarginV,
+                },
+              },
+            },
+          });
+          savedSnapshotRef.current = captionSnapshot;
+          setCaptionSaveState("saved");
+        } catch {
+          setCaptionSaveState("error");
+        }
+      })();
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [captionAlignment, captionMarginV, captionPosition, captionPreset, captionSnapshot, projectId]);
+
+  function resetCaptionPosition() {
+    setCaptionPosition(DEFAULT_CAPTION_POSITION);
+    setCaptionAlignment(DEFAULT_CAPTION_ALIGNMENT);
+    setCaptionMarginV(DEFAULT_CAPTION_MARGIN_V);
+  }
 
   const latestComplete = useMemo(
     () => renders.find((render) => render.status === "completed"),
@@ -66,7 +191,12 @@ export function RenderPanel({
         crop_y_pct: cropY,
         caption_preset: captionPreset,
         captions_enabled: captions,
-        captions: { font_family: captionFont },
+        captions: {
+          font_family: captionFont,
+          position: captionPosition,
+          alignment: captionAlignment,
+          margin_v: captionMarginV,
+        },
         normalize_audio: normalize,
       });
     } catch (caught) {
@@ -160,7 +290,12 @@ export function RenderPanel({
       </div>
 
       <div className="grid gap-4 border-t border-white/6 pt-3 lg:grid-cols-[168px_1fr]">
-        <CompositionPreview aspect={aspect} mode={composition} captionPosition="bottom" />
+        <CompositionPreview
+          aspect={aspect}
+          mode={composition}
+          captionPosition={captionPosition}
+          captionAlignment={captionAlignment}
+        />
         <div className="space-y-2">
           <p className="label">Layout preview</p>
           <p className="text-[11.5px] leading-relaxed text-mist-500">
@@ -244,7 +379,7 @@ export function RenderPanel({
               type="button"
               onClick={() => setCaptionPreset(preset.id)}
               aria-pressed={captionPreset === preset.id}
-              disabled={!captions}
+              disabled={captionControlsDisabled}
               className={cn(
                 "rounded-md border px-2.5 py-2 text-left transition-colors",
                 captionPreset === preset.id
@@ -264,6 +399,101 @@ export function RenderPanel({
             </button>
           ))}
         </div>
+
+        <div
+          className={cn(
+            "space-y-2 rounded-md border border-white/8 bg-black/20 p-2.5",
+            !captions && "pointer-events-none opacity-45",
+          )}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="label">Placement</p>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm h-6 px-1.5 text-[11px]"
+              onClick={resetCaptionPosition}
+              disabled={
+                captionControlsDisabled ||
+                (captionPosition === DEFAULT_CAPTION_POSITION &&
+                  captionAlignment === DEFAULT_CAPTION_ALIGNMENT &&
+                  captionMarginV === DEFAULT_CAPTION_MARGIN_V)
+              }
+            >
+              Reset to bottom
+            </button>
+          </div>
+          <div className="segmented w-full sm:w-auto" role="group" aria-label="Caption position">
+            {CAPTION_POSITIONS.map((position) => (
+              <button
+                key={position.id}
+                type="button"
+                data-active={captionPosition === position.id}
+                aria-pressed={captionPosition === position.id}
+                onClick={() => setCaptionPosition(position.id)}
+                disabled={!captions}
+              >
+                {position.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] leading-relaxed text-mist-600">
+            {CAPTION_POSITIONS.find((position) => position.id === captionPosition)?.hint}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-mist-500">Horizontal</span>
+            <div className="segmented" role="group" aria-label="Caption alignment">
+              {CAPTION_ALIGNMENTS.map((alignment) => (
+                <button
+                  key={alignment.id}
+                  type="button"
+                  data-active={captionAlignment === alignment.id}
+                  aria-pressed={captionAlignment === alignment.id}
+                  onClick={() => setCaptionAlignment(alignment.id)}
+                  disabled={!captions}
+                >
+                  {alignment.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {captionPosition === "bottom" ? (
+            <label className="block space-y-1 text-[11px] text-mist-500">
+              <span className="flex justify-between">
+                <span>Bottom inset</span>
+                <span className="numeric text-mist-300">{captionMarginV}px</span>
+              </span>
+              <input
+                type="range"
+                min={40}
+                max={420}
+                step={10}
+                value={captionMarginV}
+                onChange={(event) => setCaptionMarginV(Number(event.target.value))}
+                className="w-full accent-ember-500"
+                disabled={!captions}
+              />
+              <span className="block text-[10.5px] leading-relaxed text-mist-600">
+                The export keeps captions above the platform-safe bottom edge.
+              </span>
+            </label>
+          ) : null}
+          <p
+            aria-live="polite"
+            className={cn(
+              "text-[10.5px] leading-relaxed",
+              captionSaveState === "error" ? "text-signal-bad/90" : "text-mist-600",
+            )}
+          >
+            {captionSaveState === "loading"
+              ? "Loading caption defaults..."
+              : captionSaveState === "saving"
+                ? "Saving caption defaults..."
+                : captionSaveState === "error"
+                  ? "Caption defaults could not be saved. This render still uses the selected placement."
+                  : "Caption defaults are saved for this project."}
+          </p>
+        </div>
+
         <p className="text-[11px] text-mist-600">
           Captions come from the stored word timings, so the highlighted word always matches the audio.
         </p>
@@ -327,14 +557,23 @@ function CompositionPreview({
   aspect,
   mode,
   captionPosition,
+  captionAlignment,
 }: {
   aspect: AspectId;
   mode: CompositionModeId;
-  captionPosition: "bottom" | "center" | "top";
+  captionPosition: CaptionPositionId;
+  captionAlignment: CaptionAlignmentId;
 }) {
   const ratio = aspect === "9:16" ? "9 / 16" : aspect === "1:1" ? "1 / 1" : "16 / 9";
   const contained = mode === "fit" || mode === "split";
   const pip = mode === "pip";
+  const bottomInset = aspect === "9:16" ? "18%" : "10%";
+  const horizontal =
+    captionAlignment === "left"
+      ? { left: "8%", right: "auto" }
+      : captionAlignment === "right"
+        ? { left: "auto", right: "8%" }
+        : { left: "10%", right: "10%" };
   return (
     <div className="space-y-1.5">
       <div
@@ -370,10 +609,10 @@ function CompositionPreview({
           className="absolute inset-x-0 border-y border-dashed border-ember-500/40 bg-ember-500/[0.06]"
           style={
             captionPosition === "center"
-              ? { top: "45%", height: "12%" }
+              ? { ...horizontal, top: "44%", height: "12%" }
               : captionPosition === "top"
-                ? { top: "8%", height: "12%" }
-                : { bottom: "6%", height: "12%" }
+                ? { ...horizontal, top: "8%", height: "12%" }
+                : { ...horizontal, bottom: bottomInset, height: "12%" }
           }
         >
           <span className="absolute inset-0 grid place-items-center text-[8px] uppercase tracking-[0.2em] text-ember-300/80">

@@ -201,6 +201,33 @@ def test_caption_presets_use_bundled_faces():
         assert preset["font_family"]
 
 
+def test_portrait_captions_stay_above_platform_controls():
+    # given a composition that wants captions low in a 9:16 frame
+    spec = _spec(caption_overrides={"position": "bottom"})
+    composition = CompositionDecision(
+        mode="fit",
+        caption_band=CaptionBand(top_pct=0.62, bottom_pct=0.95),
+    )
+
+    # when
+    captions = build_captions([(0, 10_000)], [_words()], spec, 1080, 1920, [composition])
+
+    # then
+    assert captions.report.bands[0]["bottom_pct"] <= 0.82
+    assert captions.report.bounds_ok is True
+
+
+def test_landscape_captions_keep_the_wider_safe_band():
+    # given a landscape export
+    spec = _spec(aspect="16:9", caption_overrides={"position": "bottom"})
+
+    # when
+    captions = build_captions([(0, 10_000)], [_words()], spec, 1920, 1080)
+
+    # then
+    assert captions.report.bands[0]["bottom_pct"] == 0.90
+
+
 # --- per-segment FFmpeg chain ------------------------------------------------
 
 

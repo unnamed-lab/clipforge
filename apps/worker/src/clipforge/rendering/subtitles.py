@@ -107,14 +107,33 @@ def _scaled(value: float, reference: float) -> int:
     return max(1, int(round(value * reference / 1080)))
 
 
-def _band(composition: CompositionDecision | None, captions: CaptionSettings) -> tuple[float, float]:
+def _safe_bottom(width: int, height: int) -> float:
+    """Keep captions above platform controls on portrait video."""
+    if height >= width * 1.5:
+        return 0.82
+    if height > width:
+        return 0.88
+    return 0.90
+
+
+def _band(
+    composition: CompositionDecision | None,
+    captions: CaptionSettings,
+    width: int,
+    height: int,
+) -> tuple[float, float]:
+    safe_bottom = _safe_bottom(width, height)
     if composition and captions.avoid_visual_overlap:
-        return composition.caption_band.top_pct, composition.caption_band.bottom_pct
+        top = max(0.04, min(composition.caption_band.top_pct, 0.66))
+        bottom = min(safe_bottom, composition.caption_band.bottom_pct)
+        if bottom - top < 0.12:
+            bottom = min(safe_bottom, top + 0.12)
+        return top, bottom
     if captions.position == "top":
         return 0.04, 0.34
     if captions.position == "center":
         return 0.34, 0.66
-    return 0.62, 0.90
+    return 0.62, safe_bottom
 
 
 def _wrap(
@@ -419,7 +438,7 @@ def build_captions(
     for index, ((span_start, span_end), raw_words) in enumerate(zip(spans, words_per_span)):
         span_length = max(0, span_end - span_start)
         composition = compositions[index] if compositions and index < len(compositions) else None
-        band = _band(composition, captions)
+        band = _band(composition, captions, width, height)
         words = _word_stream(raw_words, span_start, span_end, timeline_cursor)
         if words:
             report.used = True

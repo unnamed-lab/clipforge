@@ -14,7 +14,13 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from clipforge.briefs.spec import ClippingBrief
-from clipforge.rendering.spec import CAPTION_PRESETS
+from clipforge.rendering.spec import (
+    CAPTION_PRESETS,
+    DEFAULT_CAPTION_ALIGNMENT,
+    DEFAULT_CAPTION_MARGIN_V,
+    DEFAULT_CAPTION_POSITION,
+    DEFAULT_CAPTION_PRESET,
+)
 
 LOGO_POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "custom")
 AUDIO_MODES = ("original", "original_plus_music", "replace")
@@ -83,8 +89,11 @@ class AudioPolicy(BaseModel):
 class CaptionPolicy(BaseModel):
     enabled: bool = True
     required: bool = False
-    preset: str = "clean"
+    preset: str = DEFAULT_CAPTION_PRESET
     highlight_words: bool = True
+    position: Literal["bottom", "center", "top"] = DEFAULT_CAPTION_POSITION
+    alignment: Literal["left", "center", "right"] = DEFAULT_CAPTION_ALIGNMENT
+    margin_v: int = Field(default=DEFAULT_CAPTION_MARGIN_V, ge=0, le=900)
     max_chars_per_line: int = Field(default=0, ge=0, le=80)
     shadow: float = Field(default=0.0, ge=0, le=8)
     background_opacity: int = Field(default=0, ge=0, le=100)
@@ -92,7 +101,7 @@ class CaptionPolicy(BaseModel):
     @field_validator("preset")
     @classmethod
     def _preset(cls, value: str) -> str:
-        return value if value in CAPTION_PRESETS or value == "custom" else "clean"
+        return value if value in CAPTION_PRESETS or value == "custom" else DEFAULT_CAPTION_PRESET
 
 
 class ExportDefaults(BaseModel):

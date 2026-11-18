@@ -25,6 +25,7 @@ import { Badge, ScoreMeter } from "@/components/ui";
 import { EDITORIAL_STRATEGIES } from "@clipforge/shared";
 import { RenderPanel } from "./render-panel";
 import { PackagingPanel } from "./packaging-panel";
+import { clipEndReached, clipStartReached, playbackStartMs } from "@/lib/preview-boundary";
 import { cn } from "@/lib/utils";
 
 const NUDGE_MS = 250;
@@ -83,14 +84,36 @@ export function ClipEditor({
     setTitle(candidate.title);
     setCurrentMs(candidate.start_ms);
     const video = videoRef.current;
-    if (video && Math.abs(video.currentTime * 1000 - candidate.start_ms) > 800) {
+    if (video) {
+      video.pause();
+      setPlaying(false);
       video.currentTime = candidate.start_ms / 1000;
     }
   }, [candidate.id, candidate.start_ms, candidate.end_ms, candidate.title]);
 
+  useEffect(() => {
+    const video = videoRef.current;
+    return () => {
+      video?.pause();
+    };
+  }, [candidate.id]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const ms = video.currentTime * 1000;
+    if (clipStartReached(ms, start) || clipEndReached(ms, end)) {
+      video.pause();
+      setPlaying(false);
+      video.currentTime = start / 1000;
+      setCurrentMs(start);
+    }
+  }, [start, end]);
+
   const dirty = start !== candidate.start_ms || end !== candidate.end_ms || title !== candidate.title;
   const durationMs = Math.max(0, end - start);
   const duration = source.duration_ms;
+  const previewFollowsSourceOrder = Boolean(candidate.editorial?.editorial?.reordered);
 
   const seek = useCallback((ms: number) => {
     const video = videoRef.current;
@@ -103,12 +126,27 @@ export function ClipEditor({
     const video = videoRef.current;
     if (!video) return;
     const ms = video.currentTime * 1000;
-    setCurrentMs(Math.round(ms / 100) * 100);
-    if (loop && ms >= end) {
-      video.currentTime = start / 1000;
-    } else if (ms < start - 500 || ms > end + 500) {
-      // keep the visible window honest while free-scrubbing the source
+
+    // A paused player is also the trim scrubber: let it inspect source footage
+    // outside the selection. Only an active playback is bounded by the clip.
+    if (!video.paused && clipEndReached(ms, end)) {
+      if (loop) {
+        video.currentTime = start / 1000;
+        setCurrentMs(start);
+        return;
+      }
+      video.pause();
+      video.currentTime = end / 1000;
+      setCurrentMs(end);
+      setPlaying(false);
+      return;
     }
+    if (!video.paused && clipStartReached(ms, start)) {
+      video.currentTime = start / 1000;
+      setCurrentMs(start);
+      return;
+    }
+    setCurrentMs(Math.round(ms / 100) * 100);
   };
 
   const snapPoints = useMemo(() => collectBoundaries(transcript, start, end), [transcript, start, end]);
@@ -211,7 +249,13 @@ export function ClipEditor({
           muted={muted}
           playsInline
           controls={false}
+          onEnded={() => setPlaying(false)}
         />
+        {previewFollowsSourceOrder ? (
+          <p className="border-t border-white/8 px-2.5 py-1.5 text-[11px] leading-relaxed text-mist-600">
+            Preview follows source order. The approved editorial timeline is applied only in the export.
+          </p>
+        ) : null}
         <div className="flex flex-wrap items-center gap-2 border-t border-white/8 bg-ink-900 px-2.5 py-2">
           <button
             type="button"
@@ -220,7 +264,8 @@ export function ClipEditor({
               const video = videoRef.current;
               if (!video) return;
               if (video.paused) {
-                if (video.currentTime * 1000 < start || video.currentTime * 1000 >= end) seek(start);
+                const next = playbackStartMs(video.currentTime * 1000, start, end);
+                if (next !== video.currentTime * 1000) seek(next);
                 void video.play();
               } else {
                 video.pause();
@@ -237,7 +282,7 @@ export function ClipEditor({
             <SkipForward className="size-3.5" strokeWidth={2} />
           </button>
           <span className="numeric text-[11.5px] text-mist-400">
-            {formatTimecodePrecise(currentMs)} / {formatTimecode(duration)}
+            {formatTimecodePrecise(currentMs)} / {formatTimecode(end)}
           </span>
           <button
             type="button"
@@ -412,6 +457,7 @@ export function ClipEditor({
       </section>
 
       <RenderPanel
+        key={candidate.id}
         projectId={projectId}
         capabilities={capabilities}
         durationMs={durationMs}

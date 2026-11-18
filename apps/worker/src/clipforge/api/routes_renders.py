@@ -10,7 +10,12 @@ from clipforge.api.deps import get_state
 from clipforge.api.models import RenderRequest
 from clipforge.errors import Conflict, NotFound, ValidationFailed
 from clipforge.profiles.spec import profile_snapshot, resolve_settings
-from clipforge.rendering.spec import CompositionDecision, RenderSpec, build_spec
+from clipforge.rendering.spec import (
+    DEFAULT_CAPTION_PRESET,
+    CompositionDecision,
+    RenderSpec,
+    build_spec,
+)
 from clipforge.security.paths import display_name
 from clipforge.storage.base import StorageObjectMissing, ensure_local
 
@@ -39,6 +44,9 @@ def _caption_overrides(settings: dict, payload: RenderRequest) -> dict:
         "background_opacity": captions.get("background_opacity", 65),
         "highlight": "word" if captions.get("highlight_words", True) else "none",
     }
+    for key in ("position", "alignment", "margin_v"):
+        if key in captions:
+            overrides[key] = captions[key]
     if payload.captions is not None:
         # Only fields the client actually sent may override the profile/preset.
         # Dumping defaults here would silently reset geometry the UI never touched.
@@ -280,7 +288,9 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
     resolution = payload.resolution if "resolution" in explicit else int(export.get("resolution", payload.resolution))
     framing = payload.framing if "framing" in explicit else settings["branding"].get("framing", payload.framing)
     fps = payload.fps if "fps" in explicit else export.get("fps")
-    caption_preset = payload.caption_preset if "caption_preset" in explicit else settings["captions"].get("preset", "clean")
+    caption_preset = payload.caption_preset if "caption_preset" in explicit else settings["captions"].get(
+        "preset", DEFAULT_CAPTION_PRESET
+    )
     captions_enabled = payload.captions_enabled if "captions_enabled" in explicit else bool(
         settings["captions"].get("enabled", True)
     )

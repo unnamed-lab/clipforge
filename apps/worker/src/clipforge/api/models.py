@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from clipforge.rendering.spec import CaptionSettings
+from clipforge.rendering.spec import DEFAULT_CAPTION_PRESET, CaptionSettings
 
 
 class ProjectCreate(BaseModel):
@@ -128,7 +128,7 @@ class RenderRequest(BaseModel):
     composition_overrides: dict[str, dict] | None = None
     crop_x_pct: float | None = Field(default=None, ge=0, le=100)
     crop_y_pct: float | None = Field(default=None, ge=0, le=100)
-    caption_preset: Literal["clean", "large", "minimal", "branded", "custom"] = "clean"
+    caption_preset: Literal["clean", "large", "minimal", "branded", "custom"] = DEFAULT_CAPTION_PRESET
     captions_enabled: bool = True
     captions: CaptionSettings | None = None
     captions_burn_in: bool = True

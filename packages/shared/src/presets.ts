@@ -35,6 +35,27 @@ export const CAPTION_PRESETS = [
 
 export type CaptionPresetId = (typeof CAPTION_PRESETS)[number]["id"];
 
+export const DEFAULT_CAPTION_PRESET: CaptionPresetId = "clean";
+
+export const CAPTION_POSITIONS = [
+  { id: "bottom", label: "Bottom", hint: "Default, inside the platform-safe area" },
+  { id: "center", label: "Middle", hint: "Centred, for sparse frames" },
+  { id: "top", label: "Top", hint: "Above faces and lower content" },
+] as const;
+
+export type CaptionPositionId = (typeof CAPTION_POSITIONS)[number]["id"];
+export const DEFAULT_CAPTION_POSITION: CaptionPositionId = "bottom";
+
+export const CAPTION_ALIGNMENTS = [
+  { id: "left", label: "Left" },
+  { id: "center", label: "Centre" },
+  { id: "right", label: "Right" },
+] as const;
+
+export type CaptionAlignmentId = (typeof CAPTION_ALIGNMENTS)[number]["id"];
+export const DEFAULT_CAPTION_ALIGNMENT: CaptionAlignmentId = "center";
+export const DEFAULT_CAPTION_MARGIN_V = 150;
+
 export const GOALS = [
   {
     id: "best_moments",

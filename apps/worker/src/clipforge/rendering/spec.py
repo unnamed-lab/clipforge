@@ -22,6 +22,11 @@ from clipforge.editorial.models import NarrativeRole
 
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+DEFAULT_CAPTION_PRESET = "clean"
+DEFAULT_CAPTION_POSITION = "bottom"
+DEFAULT_CAPTION_ALIGNMENT = "center"
+DEFAULT_CAPTION_MARGIN_V = 150
+
 ASPECT_DIMENSIONS: dict[str, dict[int, tuple[int, int]]] = {
     "9:16": {1080: (1080, 1920), 720: (720, 1280)},
     "16:9": {1080: (1920, 1080), 720: (1280, 720)},
@@ -96,13 +101,13 @@ class CaptionSettings(BaseModel):
     enabled: bool = True
     burn_in: bool = True
     export_sidecar: bool = False
-    preset: Literal["clean", "large", "minimal", "branded", "custom"] = "clean"
+    preset: Literal["clean", "large", "minimal", "branded", "custom"] = DEFAULT_CAPTION_PRESET
     font_family: str = Field(default="Montserrat", max_length=60)
     font_size: int = Field(default=54, ge=18, le=140)
     bold: bool = True
     weight: Literal["auto", "regular", "medium", "bold", "black"] = "auto"
-    position: Literal["bottom", "center", "top"] = "bottom"
-    margin_v: int = Field(default=150, ge=0, le=900)
+    position: Literal["bottom", "center", "top"] = DEFAULT_CAPTION_POSITION
+    margin_v: int = Field(default=DEFAULT_CAPTION_MARGIN_V, ge=0, le=900)
     margin_h: int = Field(default=64, ge=0, le=360)
     primary_color: str = "#FFFFFF"
     highlight_color: str = "#FFD166"
@@ -114,7 +119,7 @@ class CaptionSettings(BaseModel):
     max_lines: int = Field(default=2, ge=1, le=3)
     background: bool = False
     background_opacity: int = Field(default=65, ge=0, le=100)
-    alignment: Literal["left", "center", "right"] = "center"
+    alignment: Literal["left", "center", "right"] = DEFAULT_CAPTION_ALIGNMENT
     highlight: Literal["word", "none"] = "word"
     animation: Literal["none", "fade", "pop"] = "none"
     max_chars_per_line: int = Field(default=0, ge=0, le=80)
@@ -399,7 +404,7 @@ def build_spec(
     composition: str | None = None,
     crop_x_pct: float | None = None,
     crop_y_pct: float | None = None,
-    caption_preset: str = "clean",
+    caption_preset: str = DEFAULT_CAPTION_PRESET,
     captions_enabled: bool = True,
     caption_overrides: dict | None = None,
     captions_burn_in: bool = True,

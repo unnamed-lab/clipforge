@@ -5,8 +5,16 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from clipforge.profiles.spec import CaptionPolicy
 from clipforge.rendering.ffmpeg import build_command
-from clipforge.rendering.spec import RenderSpec, build_spec
+from clipforge.rendering.spec import (
+    DEFAULT_CAPTION_ALIGNMENT,
+    DEFAULT_CAPTION_MARGIN_V,
+    DEFAULT_CAPTION_POSITION,
+    DEFAULT_CAPTION_PRESET,
+    RenderSpec,
+    build_spec,
+)
 from clipforge.rendering.subtitles import build_ass
 
 
@@ -74,6 +82,17 @@ def test_editorial_narrative_roles_are_valid_render_segments():
 
     # then
     assert [segment.role for segment in spec.segments] == ["context", "main", "development", "payoff"]
+
+
+def test_new_caption_policy_defaults_to_clean_podcast_at_the_bottom():
+    # given / when
+    policy = CaptionPolicy()
+
+    # then
+    assert policy.preset == DEFAULT_CAPTION_PRESET == "clean"
+    assert policy.position == DEFAULT_CAPTION_POSITION == "bottom"
+    assert policy.alignment == DEFAULT_CAPTION_ALIGNMENT == "center"
+    assert policy.margin_v == DEFAULT_CAPTION_MARGIN_V == 150
 
 
 def test_segment_end_must_follow_its_start():
@@ -307,3 +326,43 @@ def test_caption_overrides_only_apply_fields_the_client_sent():
     assert "margin_v" not in overrides
     assert "max_words_per_line" not in overrides
     assert "max_line_width_pct" not in overrides
+
+
+def test_saved_caption_placement_is_used_when_the_client_does_not_override_it():
+    # given a project that stored top-left captions with a custom inset
+    from clipforge.api.models import RenderRequest
+    from clipforge.api.routes_renders import _caption_overrides
+
+    settings = {
+        "captions": {
+            "position": "top",
+            "alignment": "left",
+            "margin_v": 220,
+        }
+    }
+    payload = RenderRequest(candidate_id="can_1", captions={"font_family": "Montserrat"})
+
+    # when
+    overrides = _caption_overrides(settings, payload)
+
+    # then
+    assert overrides["position"] == "top"
+    assert overrides["alignment"] == "left"
+    assert overrides["margin_v"] == 220
+
+
+def test_client_caption_placement_overrides_the_saved_default():
+    # given a saved bottom default and an explicit per-render choice
+    from clipforge.api.models import RenderRequest
+    from clipforge.api.routes_renders import _caption_overrides
+
+    settings = {"captions": {"position": "bottom", "alignment": "center", "margin_v": 150}}
+    payload = RenderRequest(candidate_id="can_1", captions={"position": "top", "alignment": "right"})
+
+    # when
+    overrides = _caption_overrides(settings, payload)
+
+    # then
+    assert overrides["position"] == "top"
+    assert overrides["alignment"] == "right"
+    assert overrides["margin_v"] == 150
