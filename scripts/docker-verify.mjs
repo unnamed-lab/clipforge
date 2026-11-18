@@ -135,12 +135,14 @@ async function main() {
   console.log(`[docker] web proxy health: ${health.trim().slice(0, 160)}`);
 
   const capabilities = await json(await fetch(`${baseUrl}/api/capabilities`), "capabilities");
-  if (!capabilities.capabilities?.ffmpeg) {
-    throw new Error("Worker reports ffmpeg as unavailable inside the image.");
-  }
-  if (capabilities.capabilities?.storage?.backend !== "local") {
+  if (!capabilities.media?.ffmpeg?.available) {
     throw new Error(
-      `Docker verification must use local storage, got ${JSON.stringify(capabilities.capabilities?.storage)}`,
+      `Worker reports ffmpeg as unavailable inside the image: ${JSON.stringify(capabilities.media?.ffmpeg ?? null)}`,
+    );
+  }
+  if (capabilities.storage?.backend !== "local") {
+    throw new Error(
+      `Docker verification must use local storage, got ${JSON.stringify(capabilities.storage)}`,
     );
   }
 
