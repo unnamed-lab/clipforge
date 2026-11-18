@@ -41,6 +41,10 @@ STOPWORDS = {
     "under", "until", "up", "upon", "us", "very", "was", "way", "we", "well", "were", "what", "when",
     "where", "whether", "which", "whole", "who", "why", "will", "with", "within", "without", "would",
     "yet", "you", "your",
+    # Normalised contractions, so "#its" from "it's" never becomes a tag.
+    "arent", "cant", "couldnt", "didnt", "doesnt", "dont", "hadnt", "hasnt", "havent", "isnt",
+    "ive", "lets", "shouldnt", "thats", "theyre", "wasnt", "weve", "werent", "whats", "wont",
+    "wouldnt", "youre",
 }
 
 BROAD_HASHTAGS = {
@@ -48,6 +52,19 @@ BROAD_HASHTAGS = {
     "youtube_shorts": [("shorts", "YouTube's own Shorts format tag, not a trend claim.")],
     "instagram_reels": [("reels", "Instagram's own Reels format tag, not a trend claim.")],
     "cross_platform": [],
+}
+
+# Frequent spoken words that make weak discovery tags. They can stay in the
+# transcript and in search phrases, but they should not consume a small
+# hashtag budget that is meant for topic words.
+HASHTAG_FILLER = {
+    "according", "activate", "basically", "billion", "bit", "come", "comes", "coming",
+    "day", "days", "dollar", "dollars", "everything", "everyone", "gonna", "kind", "know",
+    "knows", "knew", "literally", "look", "looks", "looking", "lot", "made", "make", "makes",
+    "mean", "means", "meant", "million", "month", "months", "need", "needs", "nothing",
+    "number", "numbers", "okay", "percent", "pretty", "quite", "rather", "really", "said",
+    "says", "saying", "sort", "stuff", "take", "takes", "thousand", "time", "times", "took",
+    "turns", "wanna", "want", "wants", "week", "weeks", "year", "years", "yeah",
 }
 
 GENRE_LABELS = {
@@ -353,16 +370,19 @@ def _topic(context: PackagingContext, text: ClipText) -> str:
     return terms[0] if terms else "clip"
 
 
-def _top_terms(value: str, count: int) -> list[str]:
+def _term_counts(value: str) -> list[tuple[str, int]]:
     words = re.findall(r"[A-Za-z][A-Za-z'-]{2,}", value or "")
     counts: dict[str, int] = {}
     for word in words:
-        key = word.lower().strip("'-")
+        key = re.sub(r"['-]", "", word.lower())
         if key in STOPWORDS or len(key) < 3:
             continue
         counts[key] = counts.get(key, 0) + 1
-    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    return [word for word, _ in ranked[:count]]
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
+def _top_terms(value: str, count: int) -> list[str]:
+    return [word for word, _ in _term_counts(value)[:count]]
 
 
 def _hashtag(value: str) -> str:
@@ -387,18 +407,18 @@ def _hashtags(context: PackagingContext, text: ClipText, topic: str) -> list[Has
     suggestions: list[HashtagSuggestion] = []
     seen: set[str] = set()
 
-    def add(value: str, category: str, reason: str, provenance: str, relevance: float) -> None:
+    def add(value: str, category: str, reason: str, provenance: str, relevance: float) -> bool:
         tag = _hashtag(value)
         if not tag:
-            return
+            return False
         key = tag.lower()
         # Treat simple plurals as duplicates so "#customer" and "#customers"
         # never both consume one of a small hashtag budget.
         dedupe_key = key[:-1] if len(key) > 5 and key.endswith("s") else key
         if dedupe_key in seen:
-            return
+            return False
         if not 3 <= len(tag) <= 42:
-            return
+            return False
         seen.add(dedupe_key)
         suggestions.append(
             HashtagSuggestion(
@@ -409,12 +429,24 @@ def _hashtags(context: PackagingContext, text: ClipText, topic: str) -> list[Has
                 relevance=max(0.0, min(1.0, relevance)),
             )
         )
+        return True
 
     add(topic, "niche", f"Named topic/niche supplied for this project: {topic}.", "profile", 0.95)
     for subtopic in context.subtopics[:3]:
         add(subtopic, "topic", f"Named subtopic supplied for this project: {subtopic}.", "profile", 0.85)
-    for term in _top_terms(text.full_text, 6):
-        add(term, "topic", "Recurring word in the final clip transcript.", "transcript", 0.7)
+    transcript_budget = {"minimal": 0, "balanced": 2, "descriptive": 3}.get(style, 2)
+    transcript_tags = 0
+    for term, occurrences in _term_counts(text.full_text):
+        # A word spoken once is often an artefact of the clip boundary. Prefer
+        # words that actually recur, and cap how much of the budget they take.
+        if transcript_budget <= 0:
+            break
+        if occurrences < 2 or len(term) < 4 or term.lower() in HASHTAG_FILLER:
+            continue
+        if add(term, "topic", "Recurring word in the final clip transcript.", "transcript", 0.7):
+            transcript_tags += 1
+        if transcript_tags >= transcript_budget:
+            break
     genre = GENRE_LABELS.get(context.genre, "")
     if genre:
         add(genre, "broad", "Genre selected for this clip; not a trend claim.", "genre", 0.55)
