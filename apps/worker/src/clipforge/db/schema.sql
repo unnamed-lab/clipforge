@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_code       TEXT,
     error_message    TEXT,
     attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  TEXT,
     payload_json     TEXT NOT NULL DEFAULT '{}',
     result_json      TEXT,
     metrics_json     TEXT NOT NULL DEFAULT '{}',

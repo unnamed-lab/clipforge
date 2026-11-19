@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-from clipforge.db.connection import Database, utc_now
+from clipforge.db.connection import Database, utc_after, utc_now
 from clipforge.db.util import loads as _loads
 from clipforge.db.util import new_id, row_dict as _row
 from clipforge.errors import Conflict, NotFound
@@ -619,7 +619,8 @@ class JobRepository:
     def active_for(self, project_id: str, job_type: str) -> dict | None:
         with self.db.session() as conn:
             row = conn.execute(
-                "SELECT * FROM jobs WHERE project_id = ? AND type = ? AND state IN ('queued','running')"
+                "SELECT * FROM jobs WHERE project_id = ? AND type = ?"
+                " AND state IN ('queued','running','waiting')"
                 " ORDER BY created_at DESC LIMIT 1",
                 (project_id, job_type),
             ).fetchone()
@@ -633,17 +634,22 @@ class JobRepository:
         return [serialise_job(dict(r)) for r in rows]
 
     def claim_next(self) -> dict | None:
+        now = utc_now()
         with self.db.session() as conn:
             row = conn.execute(
-                "SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at ASC LIMIT 1"
+                "SELECT * FROM jobs WHERE state = 'queued'"
+                " OR (state = 'waiting' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))"
+                " ORDER BY created_at ASC LIMIT 1",
+                (now,),
             ).fetchone()
             if row is None:
                 return None
             updated = conn.execute(
                 "UPDATE jobs SET state = 'running', stage = 'starting', progress = 0,"
-                " message = 'Starting', started_at = ?, attempts = attempts + 1"
-                " WHERE id = ? AND state = 'queued'",
-                (utc_now(), row["id"]),
+                " message = 'Starting', started_at = ?, attempts = attempts + 1,"
+                " next_attempt_at = NULL"
+                " WHERE id = ? AND state = ?",
+                (now, row["id"], row["state"]),
             )
             if updated.rowcount == 0:
                 return None
@@ -703,22 +709,63 @@ class JobRepository:
             conn.execute(
                 "UPDATE jobs SET state = 'queued', stage = 'queued', progress = 0, message = 'Waiting to start',"
                 " error_code = NULL, error_message = NULL, cancel_requested = 0, started_at = NULL,"
-                " finished_at = NULL WHERE id = ?",
+                " next_attempt_at = NULL, finished_at = NULL WHERE id = ?",
                 (job_id,),
             )
         return self.get(job_id)
 
-    def mark_orphans(self) -> int:
+    def retry_later(self, job_id: str, *, delay_seconds: float, message: str) -> dict:
+        """Park a job until its next automatic attempt, without ending it.
+
+        The job stays claimable, so a restart during the wait loses nothing and
+        the UI can still show it as alive instead of as a failure.
+        """
         with self.db.session() as conn:
-            rows = conn.execute("SELECT id FROM jobs WHERE state = 'running'").fetchall()
+            conn.execute(
+                "UPDATE jobs SET state = 'waiting', stage = 'waiting', message = ?,"
+                " next_attempt_at = ?, error_code = NULL, error_message = NULL, finished_at = NULL"
+                " WHERE id = ?",
+                (message[:300], utc_after(max(0.0, delay_seconds)), job_id),
+            )
+        return self.get(job_id)
+
+    def recover_interrupted(self) -> dict[str, int]:
+        """Settle jobs a crashed worker left mid-run.
+
+        A download can prove which bytes are its own, so it goes back in the
+        queue and resumes. Everything else may have written half a result, so
+        it fails and asks for a deliberate retry.
+        """
+        counts = {"queued": 0, "failed": 0, "cancelled": 0}
+        with self.db.session() as conn:
+            rows = conn.execute(
+                "SELECT id, type, cancel_requested FROM jobs WHERE state = 'running'"
+            ).fetchall()
             for row in rows:
-                conn.execute(
-                    "UPDATE jobs SET state = 'failed', stage = 'failed', error_code = 'worker_restarted',"
-                    " error_message = 'The worker restarted before this job finished. Retry it.',"
-                    " finished_at = ? WHERE id = ?",
-                    (utc_now(), row["id"]),
-                )
-        return len(rows)
+                if row["cancel_requested"]:
+                    conn.execute(
+                        "UPDATE jobs SET state = 'cancelled', stage = 'cancelled',"
+                        " message = 'Cancelled by user', finished_at = ? WHERE id = ?",
+                        (utc_now(), row["id"]),
+                    )
+                    counts["cancelled"] += 1
+                elif row["type"] == "url_import":
+                    conn.execute(
+                        "UPDATE jobs SET state = 'queued', stage = 'queued', progress = 0,"
+                        " message = 'Resuming after a worker restart', started_at = NULL"
+                        " WHERE id = ?",
+                        (row["id"],),
+                    )
+                    counts["queued"] += 1
+                else:
+                    conn.execute(
+                        "UPDATE jobs SET state = 'failed', stage = 'failed', error_code = 'worker_restarted',"
+                        " error_message = 'The worker restarted before this job finished. Retry it.',"
+                        " finished_at = ? WHERE id = ?",
+                        (utc_now(), row["id"]),
+                    )
+                    counts["failed"] += 1
+        return counts
 
     def set_metrics(self, job_id: str, metrics: dict) -> None:
         """Attach measured numbers (bytes, speed, ETA) to a job for the UI."""

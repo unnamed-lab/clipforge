@@ -22,6 +22,7 @@ const STAGE_LABEL: Record<string, Record<string, string>> = {
     verifying: "Verifying the file",
     preparing_audio: "Preparing audio",
     preparing_proxy: "Preparing proxy",
+    waiting: "Waiting for the connection",
     done: "Ready to edit",
   },
   analysis: {
@@ -42,7 +43,7 @@ const STAGE_LABEL: Record<string, Record<string, string>> = {
   },
 };
 
-const ACTIVE = new Set(["queued", "running"]);
+const ACTIVE = new Set(["queued", "running", "waiting"]);
 
 type StageDetail = {
   downloaded_bytes?: number;
@@ -135,7 +136,9 @@ export function JobPanel({
           {TYPE_LABEL[job.type] ?? job.type}
         </p>
         <Badge
-          tone={failed ? "bad" : completed ? "good" : cancelled ? "neutral" : "ember"}
+          tone={
+            failed ? "bad" : completed ? "good" : cancelled ? "neutral" : job.state === "waiting" ? "warn" : "ember"
+          }
           className="h-5 px-2 text-[10.5px]"
         >
           {job.state}

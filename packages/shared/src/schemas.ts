@@ -7,7 +7,7 @@ import { z } from "zod";
  * runtimes cannot drift silently.
  */
 
-export const jobStateSchema = z.enum(["queued", "running", "completed", "failed", "cancelled"]);
+export const jobStateSchema = z.enum(["queued", "running", "waiting", "completed", "failed", "cancelled"]);
 export type JobState = z.infer<typeof jobStateSchema>;
 
 export const jobSchema = z

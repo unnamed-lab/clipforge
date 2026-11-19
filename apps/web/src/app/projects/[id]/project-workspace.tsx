@@ -27,7 +27,7 @@ import { CandidateRail } from "./candidate-rail";
 import { ClipEditor } from "./clip-editor";
 import { SourceImporter } from "./source-importer";
 
-const ACTIVE_STATES = new Set(["queued", "running"]);
+const ACTIVE_STATES = new Set(["queued", "running", "waiting"]);
 
 export function ProjectWorkspace({
   detail: initialDetail,

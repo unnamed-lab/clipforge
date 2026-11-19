@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SECONDS = 0.4
 PROGRESS_WRITE_INTERVAL_SECONDS = 0.35
 
+# A transient failure parks the job instead of ending it. Waiting grows from a
+# minute to half an hour, and stops after a handful of attempts so a source
+# that is never coming back still fails instead of looping forever.
+AUTOMATIC_RETRY_LIMIT = 6
+RETRY_DELAY_BASE_SECONDS = 60
+RETRY_DELAY_MAX_SECONDS = 30 * 60
+
+
+def _describe_delay(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    return "a minute" if minutes == 1 else f"{minutes} minutes"
+
 
 @dataclass
 class JobContext:
@@ -57,9 +69,17 @@ class JobQueue:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        orphans = self.repos.jobs.mark_orphans()
-        if orphans:
-            logger.warning("Marked %s interrupted job(s) as failed after restart", orphans)
+        recovered = self.repos.jobs.recover_interrupted()
+        if recovered["queued"]:
+            logger.warning(
+                "Resuming %s interrupted download(s) after a restart", recovered["queued"]
+            )
+        if recovered["failed"]:
+            logger.warning(
+                "Marked %s interrupted job(s) as failed after restart", recovered["failed"]
+            )
+        if recovered["cancelled"]:
+            logger.info("Settled %s cancelled job(s) after a restart", recovered["cancelled"])
         self._thread = threading.Thread(target=self._loop, name="clipforge-jobs", daemon=True)
         self._thread.start()
 
@@ -80,6 +100,9 @@ class JobQueue:
 
     def cancel(self, job_id: str) -> dict:
         job = self.repos.jobs.request_cancel(job_id)
+        if job["state"] == "waiting":
+            # Nothing is running to notice the flag, so settle it now.
+            return self.repos.jobs.cancel(job_id)
         with self._lock:
             if self._current_job_id == job_id and self._current_cancel is not None:
                 self._current_cancel.set()
@@ -158,7 +181,7 @@ class JobQueue:
         except JobFailed as exc:
             if exc.code == "cancelled" or context.should_cancel():
                 self.repos.jobs.cancel(job_id)
-            else:
+            elif not self._park_if_retryable(job, exc):
                 self.repos.jobs.fail(job_id, code=exc.code, message=exc.message)
                 logger.warning("Job %s failed: %s (%s)", job_id, exc.message, exc.code)
         except AppError as exc:
@@ -175,3 +198,26 @@ class JobQueue:
             with self._lock:
                 self._current_job_id = None
                 self._current_cancel = None
+
+    def _park_if_retryable(self, job: dict, exc: JobFailed) -> bool:
+        """Wait out a transient failure without ending the job.
+
+        Returns True when the job was parked, so the caller leaves it alone.
+        """
+        if not getattr(exc, "retryable", False):
+            return False
+        attempt = int(job.get("attempts") or 1)
+        if attempt > AUTOMATIC_RETRY_LIMIT:
+            return False
+        delay = min(
+            RETRY_DELAY_BASE_SECONDS * 2 ** (attempt - 1), RETRY_DELAY_MAX_SECONDS
+        )
+        self.repos.jobs.retry_later(
+            job["id"],
+            delay_seconds=delay,
+            message=f"{exc.message} Resuming automatically in {_describe_delay(delay)}.",
+        )
+        logger.warning(
+            "Job %s parked for %ss after a transient failure", job["id"], delay
+        )
+        return True

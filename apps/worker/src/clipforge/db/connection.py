@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 # Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
 # so startup applies each one only when it is missing.
@@ -43,6 +43,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     },
     "jobs": {
         "metrics_json": "TEXT NOT NULL DEFAULT '{}'",
+        "next_attempt_at": "TEXT",
     },
 }
 
@@ -50,6 +51,11 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def utc_after(seconds: float) -> str:
+    moment = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 class Database:
