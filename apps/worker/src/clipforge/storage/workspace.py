@@ -3,8 +3,9 @@
 Layout (all generated identifiers, never user strings):
 
     data/projects/<project_id>/
-        source/<file_id>.<container>
-        audio/audio.wav
+        source/<file_id>.<container>       the retained original
+        proxy/<file_id>.<height>p.mp4      low-resolution analysis copy
+        audio/audio.wav                    16 kHz mono for ASR and waveform
         analysis/transcript.json
         analysis/waveform.png
         renders/<render_id>.mp4
@@ -21,7 +22,7 @@ from clipforge.config import Settings
 from clipforge.errors import CapacityExceeded, ValidationFailed
 from clipforge.security.paths import safe_join
 
-PROJECT_SUBDIRS = ("source", "audio", "analysis", "renders", "tmp")
+PROJECT_SUBDIRS = ("source", "proxy", "audio", "analysis", "renders", "tmp")
 
 
 def project_root(settings: Settings, project_id: str) -> Path:

@@ -24,6 +24,8 @@ export const jobSchema = z
     attempts: z.number(),
     payload: z.record(z.string(), z.unknown()).default({}),
     result: z.record(z.string(), z.unknown()).nullable(),
+    /** Measured download/prepare facts, separate from progress text. */
+    metrics: z.record(z.string(), z.unknown()).default({}),
     cancel_requested: z.boolean(),
     created_at: z.string(),
     started_at: z.string().nullable(),
@@ -52,6 +54,35 @@ export const projectSchema = z
   .passthrough();
 export type Project = z.infer<typeof projectSchema>;
 
+/** What a source was downloaded at, and whether that matched the request. */
+export const downloadSummarySchema = z
+  .object({
+    quality: z.string(),
+    requested_quality: z.string().nullable().optional(),
+    selector: z.string(),
+    width: z.number().nullable().optional(),
+    height: z.number().nullable().optional(),
+    fps: z.number().nullable().optional(),
+    video_codec: z.string().nullable().optional(),
+    audio_codec: z.string().nullable().optional(),
+    container: z.string().nullable().optional(),
+    has_video: z.boolean().optional(),
+    estimated_bytes: z.number().nullable().optional(),
+    approximate: z.boolean().default(true),
+    bytes_downloaded: z.number().optional(),
+    size_bytes: z.number().optional(),
+    elapsed_seconds: z.number().optional(),
+    speed_bps: z.number().nullable().optional(),
+    explanation: z.string().default(""),
+    warnings: z.array(z.string()).default([]),
+    processing: z.record(z.string(), z.unknown()).default({}),
+    video_format_id: z.string().nullable().optional(),
+    audio_format_id: z.string().nullable().optional(),
+    reused: z.boolean().optional(),
+  })
+  .passthrough();
+export type DownloadSummary = z.infer<typeof downloadSummarySchema>;
+
 export const sourceSchema = z
   .object({
     id: z.string(),
@@ -65,14 +96,115 @@ export const sourceSchema = z
     height: z.number().nullable(),
     fps: z.number().nullable(),
     has_audio: z.boolean(),
+    has_video: z.boolean().default(true),
     video_codec: z.string().nullable(),
     audio_codec: z.string().nullable(),
     container: z.string().nullable(),
     source_url: z.string().nullable(),
+    download: downloadSummarySchema.nullable().optional(),
     created_at: z.string(),
   })
   .passthrough();
 export type Source = z.infer<typeof sourceSchema>;
+
+/** A derived working copy. Never an export input: exports read the source. */
+export const mediaAssetSchema = z
+  .object({
+    id: z.string(),
+    project_id: z.string(),
+    source_id: z.string(),
+    role: z.enum(["audio", "proxy"]),
+    relative_path: z.string(),
+    size_bytes: z.number(),
+    duration_ms: z.number(),
+    width: z.number().nullable(),
+    height: z.number().nullable(),
+    fps: z.number().nullable(),
+    has_audio: z.boolean(),
+    video_codec: z.string().nullable(),
+    audio_codec: z.string().nullable(),
+    container: z.string().nullable(),
+    settings: z.record(z.string(), z.unknown()).default({}),
+    source_identity: z.string().nullable().optional(),
+    created_at: z.string(),
+  })
+  .passthrough();
+export type MediaAsset = z.infer<typeof mediaAssetSchema>;
+
+export const downloadQualitySchema = z.enum([
+  "lowest",
+  "144p",
+  "240p",
+  "360p",
+  "480p",
+  "720p",
+  "1080p",
+  "1440p",
+  "2160p",
+  "best",
+  "audio",
+]);
+export type DownloadQuality = z.infer<typeof downloadQualitySchema>;
+
+/**
+ * Kept in step with the worker's ladder so the custom control is usable before
+ * the capabilities request answers (and when the worker is offline).
+ */
+export const DOWNLOAD_QUALITY_LADDER: ReadonlyArray<{ id: DownloadQuality; label: string }> = [
+  { id: "lowest", label: "Lowest available" },
+  { id: "144p", label: "144p" },
+  { id: "240p", label: "240p" },
+  { id: "360p", label: "360p" },
+  { id: "480p", label: "480p" },
+  { id: "720p", label: "720p" },
+  { id: "1080p", label: "1080p" },
+  { id: "1440p", label: "1440p / 2K" },
+  { id: "2160p", label: "2160p / 4K" },
+  { id: "best", label: "Best available" },
+  { id: "audio", label: "Audio only" },
+];
+
+export const processingModeSchema = z.enum(["fast", "balanced", "high", "custom"]);
+export type ProcessingMode = z.infer<typeof processingModeSchema>;
+
+export const urlImportRequestSchema = z.object({
+  url: z.string().min(8).max(2048),
+  rights_confirmed: z.boolean(),
+  quality: downloadQualitySchema.optional(),
+  processing: processingModeSchema.default("balanced"),
+  proxy_height: z.number().int().min(144).max(1440).optional(),
+});
+export type UrlImportRequest = z.infer<typeof urlImportRequestSchema>;
+
+export const urlInspectResultSchema = z
+  .object({
+    url: z.string(),
+    host: z.string(),
+    title: z.string(),
+    uploader: z.string().nullable().optional(),
+    duration_ms: z.number(),
+    thumbnail: z.string().nullable().optional(),
+    qualities: z.array(
+      z
+        .object({
+          id: z.string(),
+          label: z.string(),
+          max_height: z.number().nullable().optional(),
+          available: z.boolean(),
+          closest_height: z.number().nullable().optional(),
+          fallback: z.boolean().default(false),
+          estimated_bytes: z.number().nullable().optional(),
+          approximate: z.boolean().default(true),
+        })
+        .passthrough(),
+    ),
+    selection: z.record(z.string(), z.unknown()),
+    plan: z.record(z.string(), z.unknown()),
+    warnings: z.array(z.string()).default([]),
+    approximate_sizes: z.boolean().default(true),
+  })
+  .passthrough();
+export type UrlInspectResult = z.infer<typeof urlInspectResultSchema>;
 
 export const scoreComponentSchema = z.object({
   score: z.number(),
@@ -119,6 +251,20 @@ export const candidateBoundarySchema = z
         }),
       )
       .default([]),
+    /** What the picture evidence came from; 144p frames are not a close read. */
+    analysis: z
+      .object({
+        sampled_width: z.number().nullable().optional(),
+        sampled_height: z.number().nullable().optional(),
+        scene_fps: z.number().nullable().optional(),
+        source_height: z.number().nullable().optional(),
+        evidence: z.enum(["detail", "low_resolution"]).optional(),
+        text_verified: z.boolean().optional(),
+        text_heavy: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
+    analysis_warnings: z.array(z.string()).default([]),
   })
   .passthrough();
 export type CandidateBoundary = z.infer<typeof candidateBoundarySchema>;
@@ -706,6 +852,30 @@ export const projectDetailSchema = z.object({
 });
 export type ProjectDetail = z.infer<typeof projectDetailSchema>;
 
+export const compressionPresetSchema = z.enum(["smallest", "balanced", "higher", "custom"]);
+export type CompressionPreset = z.infer<typeof compressionPresetSchema>;
+
+/** One resolved compression profile. Resolution is chosen separately. */
+export const encodeSettingsSchema = z
+  .object({
+    preset: compressionPresetSchema,
+    codec: z.enum(["h264", "hevc"]).default("h264"),
+    crf: z.number().int().min(0).max(51),
+    audio_bitrate_kbps: z.number().int().min(64).max(320),
+    resolution_cap: z.number().int().min(320).max(3840),
+    max_fps: z.number().nullable().optional(),
+    x264_preset: z.string().optional(),
+  })
+  .passthrough();
+export type EncodeSettings = z.infer<typeof encodeSettingsSchema>;
+
+export const compressionChoiceSchema = z
+  .object({
+    preset: compressionPresetSchema,
+  })
+  .passthrough();
+export type CompressionChoice = z.infer<typeof compressionChoiceSchema>;
+
 export const capabilitiesSchema = z
   .object({
     version: z.string(),
@@ -732,6 +902,45 @@ export const capabilitiesSchema = z
     }),
     storage: z.object({ free_bytes: z.number(), min_free_bytes: z.number(), data_dir: z.string() }),
     limits: z.object({ max_upload_bytes: z.number(), max_duration_ms: z.number() }),
+    download: z
+      .object({
+        qualities: z.array(
+          z.object({ id: z.string(), label: z.string(), height: z.number().nullable() }),
+        ),
+        processing: z.array(
+          z.object({
+            id: z.string(),
+            label: z.string(),
+            default_quality: z.string().nullable(),
+            proxy_height: z.number().nullable(),
+            scene_fps: z.number().nullable(),
+            warnings: z.array(z.string()).default([]),
+          }),
+        ),
+        default_quality: z.string(),
+        proxy_height_range: z.object({ min: z.number(), max: z.number() }),
+        approximate_sizes: z.boolean().default(true),
+      })
+      .optional(),
+    compression: z
+      .object({
+        presets: z.array(
+          z.object({
+            id: z.string(),
+            label: z.string(),
+            codec: z.string(),
+            crf: z.number(),
+            audio_bitrate_kbps: z.number(),
+            resolution_cap: z.number(),
+            max_fps: z.number().nullable(),
+            note: z.string(),
+          }),
+        ),
+        codecs: z.array(z.object({ id: z.string(), label: z.string() })),
+        available_encoders: z.array(z.string()),
+        gpu_required: z.boolean(),
+      })
+      .optional(),
     platform: z.object({ os: z.string(), release: z.string(), cpu_count: z.number(), python: z.string() }),
   })
   .passthrough();
@@ -782,6 +991,8 @@ export const renderRequestSchema = z.object({
     .optional(),
   normalize_audio: z.boolean().optional(),
   title: z.string().max(120).optional(),
+  /** Independent of resolution: smallest / balanced / higher / custom. */
+  compression: compressionChoiceSchema.optional(),
 });
 export type RenderRequest = z.infer<typeof renderRequestSchema>;
 

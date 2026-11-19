@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 # Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
 # so startup applies each one only when it is missing.
@@ -35,6 +35,14 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "edit_spec_id": "TEXT",
         "subtitle_path": "TEXT",
         "review_json": "TEXT NOT NULL DEFAULT '{}'",
+    },
+    "sources": {
+        "has_video": "INTEGER NOT NULL DEFAULT 1",
+        "content_hash": "TEXT",
+        "download_json": "TEXT NOT NULL DEFAULT '{}'",
+    },
+    "jobs": {
+        "metrics_json": "TEXT NOT NULL DEFAULT '{}'",
     },
 }
 

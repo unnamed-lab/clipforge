@@ -311,8 +311,15 @@ def expand_composition(
     source_duration_ms: int | None = None,
     cache_dir: Path | None = None,
     on_progress: ProgressCallback | None = None,
+    scene_fps: float | None = None,
+    analysis_height: int = 144,
 ) -> CompositionPlan:
-    """Split the edit into scene spans and attach a decision to every span."""
+    """Split the edit into scene spans and attach a decision to every span.
+
+    ``source_path`` may be a low-resolution proxy: framing maths still uses the
+    real source dimensions, while ``analysis_height`` records what the frames
+    were actually sampled at.
+    """
     segments = [segment.model_copy(deep=True) for segment in spec.segments]
     warnings: list[str] = []
     analyses: list[SceneAnalysis] = []
@@ -372,6 +379,9 @@ def expand_composition(
                 window_end,
                 cache_dir=cache_dir,
                 source_duration_ms=source_duration_ms,
+                scene_fps=scene_fps,
+                analysis_height=analysis_height,
+                source_height=source_height,
             )
         except Exception as exc:  # visual analysis must never block an export
             logger.warning("Scene analysis failed for %s-%s: %s", segment.start_ms, segment.end_ms, exc)

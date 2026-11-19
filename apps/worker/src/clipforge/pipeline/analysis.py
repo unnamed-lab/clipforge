@@ -11,7 +11,10 @@ from typing import Callable
 from clipforge.config import Settings
 from clipforge.db.repositories import Repositories, new_id
 from clipforge.errors import JobFailed
+from clipforge.media.assets import audio_input, visual_input
 from clipforge.media.audio import extract_audio
+from clipforge.media.fingerprint import sha256_file
+from clipforge.media.visual import LOW_EVIDENCE_HEIGHT
 from clipforge.media.waveform import render_waveform
 from clipforge.pipeline.briefing import (
     apply_brief,
@@ -45,21 +48,37 @@ QUALITY_PROFILES = {
 SHORTLIST_FOR_LLM = 26
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def build_fingerprint(source_hash: str, model: str, compute_type: str, language: str | None, vad: bool) -> str:
     payload = f"{source_hash}|{model}|{compute_type}|{language or 'auto'}|{int(vad)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def analysis_fingerprint(source_path: Path, options: TranscriptionOptions) -> str:
-    return build_fingerprint(_sha256(source_path), options.model, options.compute_type, options.language, options.vad)
+def analysis_fingerprint(
+    source_path: Path | None,
+    options: TranscriptionOptions,
+    *,
+    content_hash: str | None = None,
+) -> str:
+    digest = content_hash or (sha256_file(source_path) if source_path is not None else "")
+    return build_fingerprint(digest, options.model, options.compute_type, options.language, options.vad)
+
+
+def _source_hash(repos: Repositories, source: dict, source_path: Path) -> str:
+    """The source bytes' SHA-256, computed once and then reused.
+
+    Hashing a large video on every analysis run was measurable work with no
+    benefit: the bytes cannot change while the stored file exists. The value
+    itself is unchanged, so transcripts cached before this change still match.
+    """
+    cached = source.get("content_hash")
+    if cached:
+        return str(cached)
+    digest = sha256_file(source_path)
+    try:
+        repos.sources.set_content_hash(source["project_id"], digest)
+    except Exception:  # the cache hint is not worth failing an analysis
+        logger.debug("Could not persist the source content hash", exc_info=True)
+    return digest
 
 
 def _resolve_options(settings: Settings, request: dict) -> TranscriptionOptions:
@@ -77,6 +96,46 @@ def _resolve_options(settings: Settings, request: dict) -> TranscriptionOptions:
         vad=bool(request.get("vad", True)),
         beam_size=int(profile["beam_size"]),
         model_dir=str(settings.models_dir),
+    )
+
+
+def _audio_key(project_id: str) -> str:
+    return f"projects/{project_id}/audio/audio.wav"
+
+
+def _register_audio_asset(
+    repos: Repositories,
+    storage: StorageBackend,
+    *,
+    project_id: str,
+    source: dict,
+    audio_path: Path,
+    duration_ms: int,
+) -> None:
+    """Record extracted speech audio so later runs reuse it instead of re-decoding."""
+    if repos.media.find(source["id"], "audio") is not None:
+        return
+    if not audio_path.exists() or audio_path.stat().st_size <= 1024:
+        return
+    key = _audio_key(project_id)
+    storage.put_file(key, audio_path, content_type="audio/wav")
+    repos.media.upsert(
+        project_id=project_id,
+        source_id=source["id"],
+        role="audio",
+        storage_path=str(storage.path_for(key)),
+        relative_path=key,
+        size_bytes=audio_path.stat().st_size,
+        duration_ms=duration_ms,
+        width=None,
+        height=None,
+        fps=None,
+        has_audio=True,
+        video_codec=None,
+        audio_codec="pcm_s16le",
+        container="wav",
+        settings={"sample_rate": 16_000, "channels": 1, "purpose": "speech recognition and waveform"},
+        source_identity=source.get("content_hash") or source.get("relative_path"),
     )
 
 
@@ -123,6 +182,25 @@ def run_analysis(
     paths = ensure_layout(settings, project_id)
     paths.mkdir(parents=True, exist_ok=True)
 
+    download = source.get("download") or {}
+    processing = download.get("processing") or {}
+    scene_fps = processing.get("scene_fps")
+    visual_path, analysis_height = visual_input(repos, storage, source, source_path)
+    if not source.get("has_video"):
+        visual_path = source_path
+        warnings.append(
+            "This project has no video, so cut detection, composition and visual ending review are unavailable."
+        )
+    elif analysis_height < LOW_EVIDENCE_HEIGHT:
+        warnings.append(
+            f"Scene analysis sampled {analysis_height}p frames. On-screen text may be too small to read at "
+            "that size; export review will say so where it matters."
+        )
+
+    audio_path: Path | None = audio_input(repos, storage, source)
+    if audio_path is None:
+        audio_path = paths / "audio" / "audio.wav"
+
     goal = str(request.get("goal") or "best_moments")
     clip_count = brief.clip_count
     band_choice = str(request.get("duration_band") or "auto")
@@ -133,7 +211,9 @@ def run_analysis(
         raise JobFailed("transcription_unavailable", detail or "Transcription is not available.")
 
     on_stage("prepare", 3, "Checking for an existing transcript")
-    fingerprint = analysis_fingerprint(source_path, options)
+    fingerprint = analysis_fingerprint(
+        source_path, options, content_hash=_source_hash(repos, source, source_path)
+    )
     transcript = repos.transcripts.find_by_fingerprint(project_id, fingerprint)
 
     if transcript is not None:
@@ -145,15 +225,25 @@ def run_analysis(
     else:
         if should_cancel():
             raise JobFailed("cancelled", "Cancelled")
-        on_stage("audio", 5, "Extracting audio")
-        audio_path = paths / "audio" / "audio.wav"
-        extract_audio(
-            source_path,
-            audio_path,
-            cancel=cancel_event,
-            duration_ms=int(source["duration_ms"]),
-            on_progress=lambda percent: on_stage("audio", 5 + percent * 0.05, "Extracting audio"),
-        )
+        if not audio_path.exists() or audio_path.stat().st_size <= 1024:
+            on_stage("audio", 5, "Extracting audio")
+            extract_audio(
+                source_path,
+                audio_path,
+                cancel=cancel_event,
+                duration_ms=int(source["duration_ms"]),
+                on_progress=lambda percent: on_stage("audio", 5 + percent * 0.05, "Extracting audio"),
+            )
+            _register_audio_asset(
+                repos,
+                storage,
+                project_id=project_id,
+                source=source,
+                audio_path=audio_path,
+                duration_ms=int(source["duration_ms"]),
+            )
+        else:
+            on_stage("audio", 10, "Reusing the extracted audio")
         if should_cancel():
             raise JobFailed("cancelled", "Cancelled")
 
@@ -192,7 +282,7 @@ def run_analysis(
         segments = apply_corrections(segments, corrections)
         warnings.append(f"Applied {len(corrections)} manual transcript correction(s).")
 
-    render_waveform(source_path, paths / "analysis" / "waveform.png", cancel=cancel_event)
+    render_waveform(audio_path or source_path, paths / "analysis" / "waveform.png", cancel=cancel_event)
 
     on_stage("candidates", 63, "Finding candidate moments")
     model = build_transcript_model(segments, duration_ms, language)
@@ -334,9 +424,12 @@ def run_analysis(
                 candidate_start_ms=candidate.start_ms,
                 candidate_end_ms=candidate.end_ms,
                 sentences=model.sentences,
-                source_path=source_path,
+                source_path=visual_path if source.get("has_video") else None,
                 source_duration_ms=int(source["duration_ms"]),
                 cache_dir=paths / "analysis" / "scenes",
+                scene_fps=scene_fps,
+                analysis_height=analysis_height,
+                source_height=source.get("height"),
             )
         except Exception as exc:  # ending review must never break analysis
             logger.warning("Ending review failed for %s: %s", candidate.draft.key, exc)
@@ -377,6 +470,17 @@ def run_analysis(
             f"{len(suspicious)} ending(s) may include a trailing or unrelated shot. "
             "Check the ending review before exporting."
         )
+    # Scene notes that describe the limits of the evidence are worth keeping at the
+    # run level: they say which conclusions were drawn from a low-resolution frame.
+    evidence_notes = {
+        note
+        for candidate in now_payload
+        for note in ((candidate.get("boundary") or {}).get("analysis_warnings") or [])
+        if "sampled at" in note
+    }
+    for note in sorted(evidence_notes):
+        if note not in warnings:
+            warnings.append(note)
 
     repos.candidates.replace_for_run(project_id, run_id, now_payload)
     repos.runs.finish(run_id, status="completed", provider="baseline" if llm_provider is None else "baseline+llm",

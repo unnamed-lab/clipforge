@@ -22,6 +22,23 @@ class ProjectPatch(BaseModel):
 class UrlImportRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     rights_confirmed: bool = False
+    # What to fetch, independent of what the project will later export.
+    quality: Literal[
+        "lowest", "144p", "240p", "360p", "480p", "720p",
+        "1080p", "1440p", "2160p", "best", "audio",
+    ] | None = None
+    processing: Literal["fast", "balanced", "high", "custom"] = "balanced"
+    proxy_height: int | None = Field(default=None, ge=144, le=1440)
+
+
+class UrlInspectRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    quality: Literal[
+        "lowest", "144p", "240p", "360p", "480p", "720p",
+        "1080p", "1440p", "2160p", "best", "audio",
+    ] | None = None
+    processing: Literal["fast", "balanced", "high", "custom"] = "balanced"
+    proxy_height: int | None = Field(default=None, ge=144, le=1440)
 
 
 class AnalysisRequest(BaseModel):
@@ -155,12 +172,31 @@ class RenderRequest(BaseModel):
     fps: int | None = Field(default=None, ge=15, le=60)
     title: str | None = Field(default=None, max_length=120)
     edit_spec_id: str | None = None
+    # Compression is a separate choice from resolution: {"preset": "smallest"} or
+    # {"preset": "custom", "crf": 22, "audio_bitrate_kbps": 128, ...}.
+    compression: dict | None = None
 
     @model_validator(mode="after")
     def _requires_source(self) -> "RenderRequest":
         if not self.candidate_id and not self.segments:
             raise ValueError("Provide a candidate or explicit segments to render")
         return self
+
+
+class RenderEstimateRequest(BaseModel):
+    aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
+    resolution: Literal[720, 1080] = 1080
+    fps: int | None = Field(default=None, ge=15, le=60)
+    duration_ms: int = Field(gt=0, le=86_400_000)
+    compression: dict | None = None
+
+
+class SceneInspectRequest(BaseModel):
+    """A user-requested second look at one scene, at a readable resolution."""
+
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    height: int | None = Field(default=None, ge=144, le=2160)
 
 
 class ProfileBody(BaseModel):

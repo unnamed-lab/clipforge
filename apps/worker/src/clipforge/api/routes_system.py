@@ -10,10 +10,18 @@ from fastapi import APIRouter, Request
 
 from clipforge import __version__
 from clipforge.api.deps import get_state
+from clipforge.media.policy import (
+    DEFAULT_QUALITY,
+    MAX_PROXY_HEIGHT,
+    MIN_PROXY_HEIGHT,
+    PROCESSING_MODES,
+    QUALITY_LADDER,
+)
 from clipforge.media.process import which
 from clipforge.platforms import platform_summary, safe_area_for
 from clipforge.providers.diarisation.base import UnavailableDiarisation
 from clipforge.providers.transcription.faster_whisper import MODEL_SIZES_MB, SUPPORTED_MODELS, FasterWhisperTranscription
+from clipforge.rendering.encode import CODECS, available_encoders, estimate_table
 from clipforge.storage.workspace import free_bytes
 
 router = APIRouter(prefix="/api")
@@ -107,6 +115,43 @@ def capabilities(request: Request) -> dict:
         "limits": {
             "max_upload_bytes": settings.max_upload_bytes,
             "max_duration_ms": settings.max_duration_ms,
+        },
+        # What the UI is allowed to offer. Values describe policy, not a promise
+        # that a given source publishes that rendition.
+        "download": {
+            "qualities": [
+                {"id": quality_id, "label": label, "height": height or None}
+                for quality_id, label, height in QUALITY_LADDER
+            ],
+            "processing": [
+                {
+                    "id": mode_id,
+                    "label": mode["label"],
+                    "default_quality": mode["quality"],
+                    "proxy_height": mode["proxy_height"],
+                    "scene_fps": mode["scene_fps"],
+                    "warnings": mode["warnings"],
+                }
+                for mode_id, mode in PROCESSING_MODES.items()
+            ] + [
+                {
+                    "id": "custom",
+                    "label": "Custom",
+                    "default_quality": None,
+                    "proxy_height": None,
+                    "scene_fps": None,
+                    "warnings": ["Custom accepts audio-only downloads and an explicit proxy height."],
+                }
+            ],
+            "default_quality": DEFAULT_QUALITY,
+            "proxy_height_range": {"min": MIN_PROXY_HEIGHT, "max": MAX_PROXY_HEIGHT},
+            "approximate_sizes": True,
+        },
+        "compression": {
+            "presets": estimate_table(),
+            "codecs": [{"id": codec_id, "label": codec["label"]} for codec_id, codec in CODECS.items()],
+            "available_encoders": sorted(available_encoders()),
+            "gpu_required": False,
         },
         "platforms": platform_summary(),
         "platform": {

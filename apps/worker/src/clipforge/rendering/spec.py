@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from clipforge.editorial.models import NarrativeRole
+from clipforge.rendering.encode import DEFAULT_PRESET, EncodeSettings, resolve_encode
 
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -298,6 +299,7 @@ class RenderSpec(BaseModel):
     source_id: str
     segments: list[SegmentSpan] = Field(min_length=1, max_length=40)
     video: VideoSettings = Field(default_factory=VideoSettings)
+    encode: EncodeSettings = Field(default_factory=lambda: resolve_encode(DEFAULT_PRESET))
     captions: CaptionSettings = Field(default_factory=CaptionSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
     logo: LogoOverlay = Field(default_factory=LogoOverlay)
@@ -313,6 +315,11 @@ class RenderSpec(BaseModel):
     @property
     def total_duration_ms(self) -> int:
         return sum(segment.duration_ms for segment in self.segments)
+
+    @property
+    def output_dimensions(self) -> tuple[int, int]:
+        """Target aspect dimensions after the compression width cap."""
+        return self.encode.dimensions_for(self.video.dimensions)
 
     @property
     def hook_segments(self) -> list[SegmentSpan]:
@@ -350,6 +357,7 @@ class RenderSpec(BaseModel):
                 }
             )
             cursor += segment.duration_ms
+        output_width, output_height = self.output_dimensions
         return {
             "version": self.version,
             "source_id": self.source_id,
@@ -358,9 +366,11 @@ class RenderSpec(BaseModel):
             "target": {
                 "aspect": self.video.aspect,
                 "resolution": self.video.resolution,
-                "width": self.video.dimensions[0],
-                "height": self.video.dimensions[1],
+                "width": output_width,
+                "height": output_height,
                 "fps": self.video.fps,
+                "compression": self.encode.preset,
+                "codec": self.encode.codec,
             },
             "segments": segments,
             "total_output_ms": cursor,
@@ -375,7 +385,7 @@ class RenderSpec(BaseModel):
             "version": self.version,
             "aspect": self.video.aspect,
             "resolution": self.video.resolution,
-            "dimensions": list(self.video.dimensions),
+            "dimensions": list(self.output_dimensions),
             "segments": len(self.segments),
             "composition": self.video.composition or self.video.framing,
             "composition_modes": modes,
@@ -389,6 +399,12 @@ class RenderSpec(BaseModel):
             "audio_mode": self.audio.mode,
             "logo": self.logo.enabled,
             "profile": self.profile.model_dump(),
+            "compression": self.encode.to_dict(),
+            "estimated_size_bytes": self.encode.estimate_bytes(
+                dimensions=self.video.dimensions,
+                fps=self.video.fps or 30,
+                duration_ms=self.total_duration_ms,
+            ),
             "total_ms": self.total_duration_ms,
             "estimated": True,
         }
@@ -406,6 +422,7 @@ def build_spec(
     resolution: int = 1080,
     framing: str = "crop",
     composition: str | None = None,
+    compression: EncodeSettings | dict | None = None,
     crop_x_pct: float | None = None,
     crop_y_pct: float | None = None,
     caption_preset: str = DEFAULT_CAPTION_PRESET,
@@ -439,6 +456,13 @@ def build_spec(
             "crop_y_pct": crop_y_pct,
             "fps": fps,
         },
+        "encode": (
+            compression.model_dump()
+            if isinstance(compression, EncodeSettings)
+            else resolve_encode(DEFAULT_PRESET).model_dump()
+            if compression is None
+            else compression
+        ),
         "captions": {
             "enabled": captions_enabled,
             "burn_in": captions_burn_in,

@@ -28,7 +28,13 @@ logger = logging.getLogger(__name__)
 SCENE_THRESHOLD = 0.28
 MIN_SCENE_MS = 1_200
 MAX_SAMPLES = 600
-CACHE_VERSION = 3
+CACHE_VERSION = 4
+# Text smaller than roughly a 720p frame cannot be read back at 144p. The sample
+# height is recorded with every analysis so a conclusion that rests on an
+# unreadable frame is never presented as if the text had been verified.
+DEFAULT_ANALYSIS_HEIGHT = 144
+TEXT_READABLE_HEIGHT = 720
+LOW_EVIDENCE_HEIGHT = 480
 _PTS_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 
 
@@ -82,6 +88,7 @@ class SceneAnalysis:
     samples: list[FrameSample]
     cuts: list[int]
     warnings: list[str] = field(default_factory=list)
+    analysis: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +97,7 @@ class SceneAnalysis:
             "samples": [sample.to_dict() for sample in self.samples],
             "cuts": self.cuts,
             "warnings": self.warnings,
+            "analysis": self.analysis,
         }
 
     @classmethod
@@ -117,17 +125,31 @@ class SceneAnalysis:
             for item in payload.get("samples") or []
         ]
         return cls(scenes=scenes, samples=samples, cuts=[int(value) for value in payload.get("cuts") or []],
-                   warnings=list(payload.get("warnings") or []))
+                   warnings=list(payload.get("warnings") or []),
+                   analysis=dict(payload.get("analysis") or {}))
 
 
-def _cache_key(path: Path, start_ms: int, end_ms: int) -> str:
+def _cache_key(path: Path, start_ms: int, end_ms: int, fps: float, height: int) -> str:
     try:
         stat = path.stat()
         identity = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     except OSError:
         identity = str(path)
-    raw = f"{CACHE_VERSION}|{identity}|{start_ms}|{end_ms}"
+    raw = f"{CACHE_VERSION}|{identity}|{start_ms}|{end_ms}|{fps:.3f}|{height}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def sampling_fps(duration_ms: int, desired: float) -> float:
+    """Keep the sample count bounded by slowing the rate, never by truncating.
+
+    Capping the frame count with ``-frames:v`` used to stop extraction partway
+    through a long window, so the tail of the window silently had no samples and
+    their timestamps drifted. Lowering the rate covers the whole window instead.
+    """
+    if duration_ms <= 0:
+        return max(0.1, desired)
+    ceiling = MAX_SAMPLES / (duration_ms / 1000.0)
+    return max(0.1, min(float(desired), ceiling))
 
 
 def _detect_cuts(path: Path, start_ms: int, duration_ms: int) -> tuple[list[int], list[str]]:
@@ -162,14 +184,21 @@ def _detect_cuts(path: Path, start_ms: int, duration_ms: int) -> tuple[list[int]
     return sorted(set(cuts)), warnings
 
 
-def _extract_samples(path: Path, start_ms: int, duration_ms: int, frames_dir: Path) -> tuple[list[FrameSample], list[str]]:
+def _extract_samples(
+    path: Path,
+    start_ms: int,
+    duration_ms: int,
+    frames_dir: Path,
+    *,
+    fps: float,
+    analysis_height: int,
+) -> tuple[list[FrameSample], list[str], tuple[int, int] | None]:
     warnings: list[str] = []
     frames_dir.mkdir(parents=True, exist_ok=True)
     for child in frames_dir.iterdir():
         if child.is_file():
             child.unlink(missing_ok=True)
-    fps = 1.0 if duration_ms <= 300_000 else 0.5
-    max_frames = min(MAX_SAMPLES, max(1, int(duration_ms / 1000 * fps) + 1))
+    max_frames = min(MAX_SAMPLES, max(1, int(duration_ms / 1000 * fps) + 2))
     try:
         ffmpeg = require("ffmpeg")
         result = run(
@@ -177,22 +206,24 @@ def _extract_samples(path: Path, start_ms: int, duration_ms: int, frames_dir: Pa
                 ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", f"{start_ms / 1000:.3f}", "-t", f"{max(0.2, duration_ms / 1000):.3f}",
                 "-i", str(path), "-an",
-                "-vf", f"fps={fps},scale=256:144",
+                "-vf", f"fps={fps:.4f},scale=-2:{analysis_height}",
                 "-frames:v", str(max_frames), "-q:v", "4",
                 str(frames_dir / "%05d.jpg"),
             ],
             timeout_seconds=180,
         )
     except (ProcessFailed, OSError) as exc:
-        return [], [f"Frame sampling failed; composition will use a safe fallback: {exc}"]
+        return [], [f"Frame sampling failed; composition will use a safe fallback: {exc}"], None
     if result.returncode != 0:
-        return [], ["Frame sampling failed; composition will use a safe fallback."]
+        return [], ["Frame sampling failed; composition will use a safe fallback."], None
 
     samples: list[FrameSample] = []
+    frame_size: tuple[int, int] | None = None
     for index, frame in enumerate(sorted(frames_dir.glob("*.jpg")), start=0):
         try:
             with Image.open(frame) as image:
                 rgb = np.asarray(image.convert("RGB"))
+                frame_size = frame_size or (int(image.width), int(image.height))
         except OSError:
             continue
         time_ms = start_ms + int(round(index * 1000 / fps))
@@ -207,7 +238,7 @@ def _extract_samples(path: Path, start_ms: int, duration_ms: int, frames_dir: Pa
         ))
     if not samples:
         warnings.append("No frames could be sampled; composition will use a safe fallback.")
-    return samples, warnings
+    return samples, warnings, frame_size
 
 
 def _content_rect(edge_mask: np.ndarray) -> tuple[float, float, float, float]:
@@ -356,7 +387,13 @@ def classify_features(features: dict) -> tuple[str, float]:
     return "unknown", 0.35
 
 
-def _aggregate(samples: list[FrameSample], start_ms: int, end_ms: int) -> Scene:
+def _aggregate(
+    samples: list[FrameSample],
+    start_ms: int,
+    end_ms: int,
+    *,
+    analysis_height: int = DEFAULT_ANALYSIS_HEIGHT,
+) -> Scene:
     inside = [sample for sample in samples if start_ms <= sample.time_ms < end_ms]
     if not inside:
         return Scene(start_ms=start_ms, end_ms=end_ms, content_type="unknown", confidence=0.3,
@@ -389,6 +426,14 @@ def _aggregate(samples: list[FrameSample], start_ms: int, end_ms: int) -> Scene:
         warnings.append("The source already contains black bars; containing it avoids double-cropping.")
     if features.get("text_at_edges", 0.0) > 0.5:
         warnings.append("Information reaches the left/right edges; containing it protects the text.")
+    if analysis_height < TEXT_READABLE_HEIGHT and (
+        content_type in {"slide", "screen_recording"} or features.get("text_at_edges", 0.0) > 0.5
+    ):
+        warnings.append(
+            f"This scene looks text-heavy but was sampled at {analysis_height}p. "
+            "Small text cannot be read at that resolution; analyse the scene at a higher "
+            "resolution before relying on it."
+        )
     return Scene(
         start_ms=start_ms,
         end_ms=end_ms,
@@ -419,15 +464,30 @@ def analyse_source_window(
     *,
     cache_dir: Path | None = None,
     source_duration_ms: int | None = None,
+    scene_fps: float | None = None,
+    analysis_height: int = DEFAULT_ANALYSIS_HEIGHT,
+    source_height: int | None = None,
 ) -> SceneAnalysis:
-    """Analyse one source window, caching the deterministic result on disk."""
+    """Analyse one source window, caching the deterministic result on disk.
+
+    ``analysis_height`` is the height frames are sampled at. It is recorded in
+    the result so the caller can tell an evidence-backed composition decision
+    from one taken on a frame too small to read text. Callers that hold a
+    low-resolution proxy pass its height here; the source's real height is kept
+    in ``source_height`` so the difference stays visible.
+    """
     start_ms = max(0, int(start_ms))
     end_ms = max(start_ms + 500, int(end_ms))
     if source_duration_ms:
         end_ms = min(end_ms, int(source_duration_ms))
     duration_ms = max(500, end_ms - start_ms)
+    height = max(72, min(2160, int(analysis_height)))
+    desired_fps = float(scene_fps) if scene_fps and scene_fps > 0 else (
+        1.0 if duration_ms <= 300_000 else 0.5
+    )
+    fps = sampling_fps(duration_ms, desired_fps)
 
-    key = _cache_key(path, start_ms, end_ms)
+    key = _cache_key(path, start_ms, end_ms, fps, height)
     cache_file = (cache_dir / f"{key}.json") if cache_dir else None
     if cache_file and cache_file.exists():
         try:
@@ -441,7 +501,9 @@ def analyse_source_window(
         import tempfile
 
         frames_dir = Path(tempfile.mkdtemp(prefix="clipforge-scenes-"))
-    samples, sample_warnings = _extract_samples(path, start_ms, duration_ms, frames_dir)
+    samples, sample_warnings, frame_size = _extract_samples(
+        path, start_ms, duration_ms, frames_dir, fps=fps, analysis_height=height
+    )
 
     raw_boundaries = [start_ms, *cuts, *_boundaries_from_samples(samples, start_ms, end_ms), end_ms]
     raw_boundaries = sorted({value for value in raw_boundaries if start_ms <= value <= end_ms})
@@ -453,7 +515,7 @@ def analyse_source_window(
         filtered.append(end_ms)
 
     scenes = [
-        _aggregate(samples, filtered[index], filtered[index + 1])
+        _aggregate(samples, filtered[index], filtered[index + 1], analysis_height=height)
         for index in range(len(filtered) - 1)
         if filtered[index + 1] > filtered[index]
     ]
@@ -477,7 +539,30 @@ def analyse_source_window(
             break
 
     warnings = list(dict.fromkeys(cut_warnings + sample_warnings))
-    analysis = SceneAnalysis(scenes=scenes, samples=samples, cuts=cuts, warnings=warnings)
+    text_heavy = any(
+        scene.content_type in {"slide", "screen_recording"} for scene in scenes
+    ) or any(scene.features.get("text_at_edges", 0.0) > 0.5 for scene in scenes)
+    if text_heavy and height < TEXT_READABLE_HEIGHT:
+        warnings.append(
+            f"Text-heavy scenes were sampled at {height}p; small text may be unreadable at that size. "
+            "A higher-resolution download is required to verify it."
+        )
+    sampled_width, sampled_height = frame_size or (None, height)
+    analysis = SceneAnalysis(
+        scenes=scenes,
+        samples=samples,
+        cuts=cuts,
+        warnings=warnings,
+        analysis={
+            "sampled_width": sampled_width,
+            "sampled_height": sampled_height,
+            "scene_fps": round(fps, 3),
+            "source_height": source_height,
+            "evidence": "detail" if height >= TEXT_READABLE_HEIGHT else "low_resolution",
+            "text_verified": height >= TEXT_READABLE_HEIGHT,
+            "text_heavy": text_heavy,
+        },
+    )
     if cache_file:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = cache_file.with_suffix(".partial")

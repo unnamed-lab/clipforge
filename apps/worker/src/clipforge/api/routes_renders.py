@@ -7,10 +7,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 
 from clipforge.api.deps import get_state
-from clipforge.api.models import RenderRequest
+from clipforge.api.models import RenderEstimateRequest, RenderRequest
 from clipforge.errors import Conflict, NotFound, ValidationFailed
 from clipforge.profiles.spec import profile_snapshot, resolve_settings
+from clipforge.rendering.encode import EncodeSettings, resolve_encode
 from clipforge.rendering.spec import (
+    ASPECT_DIMENSIONS,
     DEFAULT_CAPTION_PRESET,
     CompositionDecision,
     RenderSpec,
@@ -216,6 +218,64 @@ def _checks(settings: dict, captions_enabled: bool, logo: dict, audio: dict, ove
             )
 
 
+def _resolve_compression(raw: object) -> EncodeSettings:
+    if raw is None:
+        return resolve_encode(None)
+    if isinstance(raw, str):
+        try:
+            return resolve_encode(raw)
+        except ValueError as exc:
+            raise ValidationFailed(str(exc), code="invalid_compression") from exc
+    if not isinstance(raw, dict):
+        raise ValidationFailed("Compression settings must be an object", code="invalid_compression")
+    custom = {key: value for key, value in raw.items() if key != "preset"}
+    try:
+        return resolve_encode(raw.get("preset"), custom or None)
+    except ValueError as exc:
+        raise ValidationFailed(str(exc), code="invalid_compression") from exc
+
+
+def _compression_payload(settings: dict, payload: RenderRequest, explicit: set[str]) -> EncodeSettings:
+    """Resolve the compression choice, honouring a project-level default.
+
+    An explicit request always wins; otherwise the profile's saved export
+    preferences are used, and only then the balanced preset.
+    """
+    raw = payload.compression if "compression" in explicit else (settings.get("export") or {}).get("compression")
+    return _resolve_compression(raw)
+
+
+@router.post("/projects/{project_id}/renders/estimate")
+def estimate_render(project_id: str, payload: RenderEstimateRequest, request: Request) -> dict:
+    """Approximate the output size from duration and the chosen bitrate.
+
+    The estimate is labelled approximate on purpose: FFmpeg's real output
+    depends on the content. It exists so the user can compare presets, not so
+    the UI can promise a file size.
+    """
+    state = get_state(request)
+    project = state.repos.projects.get(project_id)
+    profile = state.repos.profiles.get(project["profile_id"]) if project.get("profile_id") else None
+    settings = resolve_settings(profile, project.get("overrides"))["settings"]
+    raw = payload.compression if "compression" in payload.model_fields_set else None
+    compression = _resolve_compression(
+        raw if raw is not None else (settings.get("export") or {}).get("compression")
+    )
+    base = ASPECT_DIMENSIONS[payload.aspect][int(payload.resolution)]
+    width, height = compression.dimensions_for(base)
+    fps = min(float(payload.fps or compression.max_fps or 30), 60.0)
+    estimated = compression.estimate_bytes(dimensions=base, fps=fps, duration_ms=payload.duration_ms)
+    return {
+        "estimated_bytes": estimated,
+        "approximate": True,
+        "basis": "duration × estimated video bitrate + audio bitrate",
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "encode": compression.to_dict(),
+    }
+
+
 @router.post("/projects/{project_id}/renders")
 def create_render(project_id: str, payload: RenderRequest, request: Request) -> dict:
     state = get_state(request)
@@ -240,6 +300,8 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
         except ValueError as exc:
             raise ValidationFailed(str(exc), code="invalid_render_spec") from exc
         spec.edit_spec_id = saved["id"]
+        if "compression" in payload.model_fields_set:
+            spec.encode = _compression_payload(settings, payload, payload.model_fields_set)
         if not spec.profile_snapshot:
             spec.profile_snapshot = saved["profile_snapshot"]
         render = state.repos.renders.create(
@@ -296,6 +358,7 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
     )
     audio = _audio_payload(settings, payload)
     logo, logo_override = _logo_payload(settings, payload)
+    compression = _compression_payload(settings, payload, explicit)
     override = bool(payload.override_policy or logo_override)
     _checks(settings, captions_enabled, logo, audio, override, state.repos)
 
@@ -307,6 +370,7 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
             resolution=resolution,
             framing=framing,
             composition=payload.composition if "composition" in explicit else "auto",
+            compression=compression,
             crop_x_pct=payload.crop_x_pct,
             crop_y_pct=payload.crop_y_pct,
             caption_preset=caption_preset,

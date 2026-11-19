@@ -28,6 +28,31 @@ type CaptionPresetId = (typeof CAPTION_PRESETS)[number]["id"];
 type CaptionPositionId = (typeof CAPTION_POSITIONS)[number]["id"];
 type CaptionAlignmentId = (typeof CAPTION_ALIGNMENTS)[number]["id"];
 type CompositionModeId = (typeof COMPOSITION_MODES)[number]["id"];
+type CompressionPresetId = "smallest" | "balanced" | "higher" | "custom";
+
+const COMPRESSION_FALLBACK: Record<
+  CompressionPresetId,
+  { label: string; note: string }
+> = {
+  smallest: { label: "Smallest file", note: "CRF 28, up to 720p, 96 kbps audio." },
+  balanced: { label: "Balanced", note: "CRF 23, up to 1080p, 128 kbps audio." },
+  higher: { label: "Higher quality", note: "CRF 18, full resolution, 192 kbps audio." },
+  custom: { label: "Custom", note: "Set the encoder values yourself." },
+};
+
+function compressionBodyFor(
+  preset: CompressionPresetId,
+  custom: { crf: number; audio: number; width: number; fps: number | null },
+): Record<string, unknown> {
+  if (preset !== "custom") return { preset };
+  return {
+    preset: "custom",
+    crf: custom.crf,
+    audio_bitrate_kbps: custom.audio,
+    resolution_cap: custom.width,
+    max_fps: custom.fps,
+  };
+}
 
 export function RenderPanel({
   projectId,
@@ -63,9 +88,25 @@ export function RenderPanel({
   const [captions, setCaptions] = useState(true);
   const [normalize, setNormalize] = useState(true);
   const [showPreview, setShowPreview] = useState(false);
+  const [compression, setCompression] = useState<CompressionPresetId>("balanced");
+  const [customCrf, setCustomCrf] = useState(23);
+  const [customAudio, setCustomAudio] = useState(128);
+  const [customWidth, setCustomWidth] = useState(1080);
+  const [customFps, setCustomFps] = useState<number | null>(30);
+  const [estimate, setEstimate] = useState<{
+    estimated_bytes: number;
+    width: number;
+    height: number;
+    fps: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const hydratedRef = useRef(false);
   const savedSnapshotRef = useRef("");
+
+  const compressionBody = useMemo(
+    () => compressionBodyFor(compression, { crf: customCrf, audio: customAudio, width: customWidth, fps: customFps }),
+    [compression, customCrf, customAudio, customWidth, customFps],
+  );
 
   const captionSnapshot = useMemo(
     () =>
@@ -75,8 +116,16 @@ export function RenderPanel({
         position_pct: captionPositionPct,
         alignment: captionAlignment,
         margin_v: captionMarginV,
+        export_compression: compressionBody,
       }),
-    [captionPreset, captionPosition, captionPositionPct, captionAlignment, captionMarginV],
+    [
+      captionPreset,
+      captionPosition,
+      captionPositionPct,
+      captionAlignment,
+      captionMarginV,
+      compressionBody,
+    ],
   );
   const captionControlsDisabled = !captions || captionSaveState === "loading";
 
@@ -114,12 +163,36 @@ export function RenderPanel({
         setCaptionPositionPct(positionPct);
         setCaptionAlignment(alignment);
         setCaptionMarginV(margin);
+
+        const storedExport = (loaded.overrides?.export ?? {}) as Record<string, unknown>;
+        const savedCompression = storedExport.compression;
+        let nextPreset: CompressionPresetId = "balanced";
+        let nextCustom = { crf: 23, audio: 128, width: 1080, fps: 30 as number | null };
+        if (typeof savedCompression === "string" && savedCompression in COMPRESSION_FALLBACK) {
+          nextPreset = savedCompression as CompressionPresetId;
+        } else if (savedCompression && typeof savedCompression === "object") {
+          const raw = savedCompression as Record<string, unknown>;
+          const preset = raw.preset;
+          if (typeof preset === "string" && preset in COMPRESSION_FALLBACK) nextPreset = preset as CompressionPresetId;
+          nextCustom = {
+            crf: typeof raw.crf === "number" ? raw.crf : nextCustom.crf,
+            audio: typeof raw.audio_bitrate_kbps === "number" ? raw.audio_bitrate_kbps : nextCustom.audio,
+            width: typeof raw.resolution_cap === "number" ? raw.resolution_cap : nextCustom.width,
+            fps: raw.max_fps === null || typeof raw.max_fps === "number" ? (raw.max_fps as number | null) : nextCustom.fps,
+          };
+        }
+        setCompression(nextPreset);
+        setCustomCrf(nextCustom.crf);
+        setCustomAudio(nextCustom.audio);
+        setCustomWidth(nextCustom.width);
+        setCustomFps(nextCustom.fps);
         savedSnapshotRef.current = JSON.stringify({
           preset,
           position,
           position_pct: positionPct,
           alignment,
           margin_v: margin,
+          export_compression: compressionBodyFor(nextPreset, nextCustom),
         });
         hydratedRef.current = true;
         setCaptionSaveState("saved");
@@ -133,6 +206,7 @@ export function RenderPanel({
           position_pct: DEFAULT_CAPTION_POSITION_PCT,
           alignment: DEFAULT_CAPTION_ALIGNMENT,
           margin_v: DEFAULT_CAPTION_MARGIN_V,
+          export_compression: compressionBodyFor("balanced", { crf: 23, audio: 128, width: 1080, fps: 30 }),
         });
         setCaptionSaveState("error");
       });
@@ -168,6 +242,12 @@ export function RenderPanel({
                   alignment: captionAlignment,
                   margin_v: captionMarginV,
                 },
+                export: {
+                  ...(typeof base.export === "object" && base.export !== null
+                    ? (base.export as Record<string, unknown>)
+                    : {}),
+                  compression: compressionBody,
+                },
               },
             },
           });
@@ -186,11 +266,34 @@ export function RenderPanel({
     captionPositionPct,
     captionPreset,
     captionSnapshot,
+    compressionBody,
     projectId,
   ]);
 
-  function resetCaptionPosition() {
-    setCaptionPosition(DEFAULT_CAPTION_POSITION);
+  useEffect(() => {
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      apiJson<{ estimated_bytes: number; width: number; height: number; fps: number }>(
+        `/api/projects/${projectId}/renders/estimate`,
+        {
+          method: "POST",
+          body: { aspect, resolution, duration_ms: durationMs, compression: compressionBody },
+        },
+      )
+        .then((value) => {
+          if (alive) setEstimate(value);
+        })
+        .catch(() => {
+          if (alive) setEstimate(null);
+        });
+    }, 350);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [aspect, resolution, durationMs, compressionBody, projectId]);
+
+  function resetCaptionPosition() {    setCaptionPosition(DEFAULT_CAPTION_POSITION);
     setCaptionPositionPct(DEFAULT_CAPTION_POSITION_PCT);
     setCaptionAlignment(DEFAULT_CAPTION_ALIGNMENT);
     setCaptionMarginV(DEFAULT_CAPTION_MARGIN_V);
@@ -220,6 +323,7 @@ export function RenderPanel({
           margin_v: captionMarginV,
         },
         normalize_audio: normalize,
+        compression: compressionBody,
       });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The render could not be queued.");
@@ -530,17 +634,124 @@ export function RenderPanel({
             )}
           >
             {captionSaveState === "loading"
-              ? "Loading caption defaults..."
+              ? "Loading saved defaults..."
               : captionSaveState === "saving"
-                ? "Saving caption defaults..."
+                ? "Saving defaults..."
                 : captionSaveState === "error"
-                  ? "Caption defaults could not be saved. This render still uses the selected placement."
-                  : "Caption defaults are saved for this project."}
+                  ? "Saved defaults could not be updated. This render still uses the selected options."
+                  : "Caption and compression defaults are saved for this project."}
           </p>
         </div>
 
         <p className="text-[11px] text-mist-600">
           Captions come from the stored word timings, so the highlighted word always matches the audio.
+        </p>
+      </div>
+
+      <div className="space-y-2 border-t border-white/6 pt-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="label">Compression</p>
+          <span className="numeric text-[11px] text-mist-500">
+            {estimate
+              ? `≈ ${formatBytes(estimate.estimated_bytes)} · ${estimate.width}×${estimate.height} · ${Math.round(estimate.fps)} fps`
+              : "size unavailable"}
+            <span className="text-mist-600"> · approximate</span>
+          </span>
+        </div>
+        <div className="grid gap-1.5 sm:grid-cols-2">
+          {(Object.keys(COMPRESSION_FALLBACK) as CompressionPresetId[]).map((presetId) => {
+            const known = capabilities?.compression?.presets.find((entry) => entry.id === presetId);
+            const label = known?.label ?? COMPRESSION_FALLBACK[presetId].label;
+            const note = known?.note ?? COMPRESSION_FALLBACK[presetId].note;
+            return (
+              <button
+                key={presetId}
+                type="button"
+                aria-pressed={compression === presetId}
+                onClick={() => setCompression(presetId)}
+                className={cn(
+                  "rounded-md border px-2.5 py-2 text-left transition-colors",
+                  compression === presetId
+                    ? "border-ember-500/50 bg-ember-500/[0.08]"
+                    : "border-white/8 bg-black/20 hover:border-white/16",
+                )}
+              >
+                <span className="text-[12.5px] font-medium text-mist-100">{label}</span>
+                <span className="mt-0.5 block text-[11px] leading-snug text-mist-500">{note}</span>
+              </button>
+            );
+          })}
+        </div>
+        {compression === "custom" ? (
+          <div className="grid gap-2 rounded-md border border-white/8 bg-black/20 p-2.5 sm:grid-cols-2">
+            <label className="block space-y-1 text-[11px] text-mist-500">
+              <span className="flex justify-between">
+                <span>Quality (CRF)</span>
+                <span className="numeric text-mist-300">{customCrf}</span>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={51}
+                value={customCrf}
+                onChange={(event) => setCustomCrf(Number(event.target.value))}
+                className="w-full accent-ember-500"
+              />
+              <span className="block text-[10.5px] text-mist-600">Lower is better quality. 18 is high, 28 is small.</span>
+            </label>
+            <label className="block space-y-1 text-[11px] text-mist-500">
+              <span className="flex justify-between">
+                <span>Audio bitrate</span>
+                <span className="numeric text-mist-300">{customAudio} kbps</span>
+              </span>
+              <input
+                type="range"
+                min={64}
+                max={320}
+                step={32}
+                value={customAudio}
+                onChange={(event) => setCustomAudio(Number(event.target.value))}
+                className="w-full accent-ember-500"
+              />
+              <span className="block text-[10.5px] text-mist-600">64–320 kbps. Speech is fine at 128.</span>
+            </label>
+            <label className="block space-y-1 text-[11px] text-mist-500">
+              <span>Resolution cap</span>
+              <select
+                className="field h-8 w-full text-[12px]"
+                value={customWidth}
+                onChange={(event) => setCustomWidth(Number(event.target.value))}
+              >
+                {[480, 720, 1080, 1440, 1920, 2560, 3840].map((width) => (
+                  <option key={width} value={width}>
+                    {width}p
+                  </option>
+                ))}
+              </select>
+              <span className="block text-[10.5px] text-mist-600">Caps the short edge; aspect is preserved.</span>
+            </label>
+            <label className="block space-y-1 text-[11px] text-mist-500">
+              <span>Frame rate cap</span>
+              <select
+                className="field h-8 w-full text-[12px]"
+                value={customFps ?? "source"}
+                onChange={(event) =>
+                  setCustomFps(event.target.value === "source" ? null : Number(event.target.value))
+                }
+              >
+                <option value="source">Keep source rate</option>
+                {[24, 25, 30, 60].map((fps) => (
+                  <option key={fps} value={fps}>
+                    {fps} fps
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : null}
+        <p className="text-[11px] leading-relaxed text-mist-600">
+          Compression is separate from resolution: a 1080p frame can still be a small file. The size above is
+          estimated from duration and bitrate, not a guarantee.
         </p>
       </div>
 

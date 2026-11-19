@@ -26,9 +26,20 @@ import { EDITORIAL_STRATEGIES } from "@clipforge/shared";
 import { RenderPanel } from "./render-panel";
 import { PackagingPanel } from "./packaging-panel";
 import { clipEndReached, clipStartReached, playbackStartMs } from "@/lib/preview-boundary";
+import { apiJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const NUDGE_MS = 250;
+
+/** What the worker reports after re-sampling one scene at a readable size. */
+type InspectResult = {
+  start_ms: number;
+  end_ms: number;
+  analysis: { sampled_width: number | null; sampled_height: number | null; text_verified: boolean };
+  warnings: string[];
+  text_verified: boolean;
+  note: string;
+};
 
 export function ClipEditor({
   projectId,
@@ -382,6 +393,7 @@ export function ClipEditor({
 
       <EndingReview
         candidate={candidate}
+        projectId={projectId}
         onUseEnd={(ms) => setEnd(clamp(ms, start + 1000, duration))}
         onBoundary={onBoundary}
       />
@@ -760,10 +772,12 @@ function truncate(value: string, limit: number): string {
 
 function EndingReview({
   candidate,
+  projectId,
   onUseEnd,
   onBoundary,
 }: {
   candidate: Candidate;
+  projectId: string;
   onUseEnd: (ms: number) => void;
   onBoundary: (candidateId: string, action: { action: "accept" | "reject" | "reset"; end_ms?: number }) => Promise<void>;
 }) {
@@ -771,6 +785,9 @@ function EndingReview({
   const evidence = boundary?.evidence ?? [];
   const alternatives = boundary?.alternatives ?? [];
   const [busy, setBusy] = useState<string | null>(null);
+  const [inspect, setInspect] = useState<InspectResult | null>(null);
+  const [inspectError, setInspectError] = useState<string | null>(null);
+  const [inspecting, setInspecting] = useState(false);
   if (!boundary || (evidence.length === 0 && alternatives.length === 0)) return null;
 
   async function act(action: "accept" | "reject" | "reset", endMs?: number) {
@@ -779,6 +796,22 @@ function EndingReview({
       await onBoundary(candidate.id, { action, end_ms: endMs });
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function checkFrames() {
+    setInspecting(true);
+    setInspectError(null);
+    try {
+      const result = await apiJson<InspectResult>(
+        `/api/projects/${projectId}/scene-inspect`,
+        { method: "POST", body: { start_ms: candidate.start_ms, end_ms: candidate.end_ms } },
+      );
+      setInspect(result);
+    } catch (error) {
+      setInspectError(error instanceof Error ? error.message : "Could not inspect that scene.");
+    } finally {
+      setInspecting(false);
     }
   }
 
@@ -811,6 +844,33 @@ function EndingReview({
           ))}
         </ul>
       ) : null}
+
+      <div className="space-y-1.5 rounded-md border border-white/8 bg-black/20 px-2.5 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] leading-snug text-mist-500">
+            Scene analysis samples small frames. Ask for a second look when on-screen text matters.
+          </p>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm h-6 px-2 text-[11px]"
+            disabled={inspecting}
+            onClick={() => void checkFrames()}
+          >
+            {inspecting ? "Checking frames" : "Check text at full resolution"}
+          </button>
+        </div>
+        {inspect ? (
+          <div className="space-y-1">
+            <p className={cn("text-[11.5px] leading-relaxed", inspect.text_verified ? "text-mist-300" : "text-signal-warn")}>
+              {inspect.note}
+            </p>
+            {inspect.warnings.slice(0, 3).map((warning) => (
+              <p key={warning} className="text-[11px] leading-snug text-signal-warn">· {warning}</p>
+            ))}
+          </div>
+        ) : null}
+        {inspectError ? <p className="text-[11px] text-signal-bad">{inspectError}</p> : null}
+      </div>
 
       {alternatives.length > 1 ? (
         <div className="space-y-1.5">

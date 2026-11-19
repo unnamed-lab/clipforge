@@ -3,13 +3,22 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from clipforge.api.deps import get_state
-from clipforge.api.models import AnalysisRequest, BoundaryAction, CandidatePatch, EditorialAction
+from clipforge.api.models import (
+    AnalysisRequest,
+    BoundaryAction,
+    CandidatePatch,
+    EditorialAction,
+    SceneInspectRequest,
+)
 from clipforge.briefs.spec import ClippingBrief
 from clipforge.durations import duration_record
 from clipforge.editorial.narrative import build_retention_plan
 from clipforge.errors import Conflict, NotFound, ValidationFailed
+from clipforge.media.visual import TEXT_READABLE_HEIGHT, analyse_source_window
 from clipforge.ranking.sentences import build_transcript_model
 from clipforge.security.limits import MIN_CLIP_MS, validate_span
+from clipforge.storage.base import StorageObjectMissing, ensure_local
+from clipforge.storage.workspace import ensure_layout
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
@@ -57,6 +66,84 @@ def start_analysis(project_id: str, payload: AnalysisRequest, request: Request) 
         },
     )
     return {"job": job, "deduplicated": False}
+
+
+@router.post("/projects/{project_id}/scene-inspect")
+def inspect_scene(project_id: str, payload: SceneInspectRequest, request: Request) -> dict:
+    """Re-sample one scene window at the best resolution the source can supply.
+
+    The pipeline analyses cheap, low-resolution frames on purpose, and says so
+    in its evidence. This endpoint is the user's way to ask for a second look at
+    a single moment without re-running the whole analysis. It reads the retained
+    source, never the analysis proxy, and it never upscales: if the source is
+    480p, that is the best evidence there is and the response says so.
+    """
+    state = get_state(request)
+    state.repos.projects.get(project_id)
+    source = state.repos.sources.find_optional(project_id)
+    if source is None:
+        raise ValidationFailed("Import a video before inspecting a scene", code="source_missing")
+    if not source.get("has_video"):
+        raise ValidationFailed(
+            "This source was downloaded without video, so there are no frames to inspect.",
+            code="no_video_stream",
+        )
+
+    duration_ms = int(source["duration_ms"])
+    requested_start = max(0, int(payload.start_ms))
+    if int(payload.end_ms) - requested_start < 500:
+        # Widening silently would inspect a different moment than the one asked for.
+        raise ValidationFailed(
+            "Choose a window of at least half a second to inspect", code="invalid_span"
+        )
+    start_ms = min(requested_start, max(0, duration_ms - 500))
+    end_ms = min(duration_ms, int(payload.end_ms))
+    if end_ms - start_ms < 500:
+        raise ValidationFailed(
+            "Choose a window of at least half a second to inspect", code="invalid_span"
+        )
+
+    try:
+        path = ensure_local(
+            state.storage,
+            source.get("relative_path"),
+            legacy_path=source.get("storage_path"),
+            missing_message="The source file is missing from this project",
+        )
+    except StorageObjectMissing as exc:
+        raise NotFound(exc.message) from exc
+
+    source_height = int(source.get("height") or 0) or None
+    wanted = int(payload.height or TEXT_READABLE_HEIGHT)
+    height = min(wanted, source_height) if source_height else wanted
+    height = max(144, height)
+
+    paths = ensure_layout(state.settings, project_id)
+    result = analyse_source_window(
+        path,
+        start_ms,
+        end_ms,
+        cache_dir=paths / "analysis" / "scenes",
+        source_duration_ms=duration_ms,
+        scene_fps=1.0,
+        analysis_height=height,
+        source_height=source_height,
+    )
+    verified = bool(result.analysis.get("text_verified"))
+    sampled = result.analysis.get("sampled_height") or height
+    return {
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "analysis": result.analysis,
+        "scenes": [scene.to_dict() for scene in result.scenes],
+        "warnings": result.warnings,
+        "text_verified": verified,
+        "note": (
+            f"Inspected at {sampled}p. On-screen text is readable at this resolution."
+            if verified
+            else f"Inspected at {sampled}p. The source cannot supply a frame where small text is readable."
+        ),
+    }
 
 
 @router.get("/projects/{project_id}/candidates")

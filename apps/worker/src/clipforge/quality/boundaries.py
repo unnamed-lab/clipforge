@@ -58,6 +58,9 @@ def review_ending(
     source_path: Path | None = None,
     source_duration_ms: int | None = None,
     cache_dir: Path | None = None,
+    scene_fps: float | None = None,
+    analysis_height: int = 144,
+    source_height: int | None = None,
 ) -> dict:
     previous, current, following = _sentence_at(sentences, candidate_end_ms)
     evidence: list[str] = []
@@ -72,6 +75,9 @@ def review_ending(
                 min(source_duration_ms or 10**12, candidate_end_ms + WINDOW_AFTER_MS),
                 cache_dir=cache_dir,
                 source_duration_ms=source_duration_ms,
+                scene_fps=scene_fps,
+                analysis_height=analysis_height,
+                source_height=source_height,
             )
         except Exception as exc:  # evidence is best-effort; it must not block analysis
             logger.debug("Ending scene analysis failed: %s", exc)
@@ -201,8 +207,10 @@ def review_ending(
     suspicious = suspicion >= 0.45
     if not suspicious:
         evidence.append("No strong evidence of an unrelated trailing shot.")
+    if source_path is None:
+        evidence.append("Visual ending review is unavailable because this project has no video.")
     return {
-        "version": 1,
+        "version": 2,
         "reviewed": "pending",
         "suspicious": suspicious,
         "suspicion": round(min(1.0, suspicion), 2),
@@ -215,4 +223,8 @@ def review_ending(
         "nearest_cut_after_ms": cut_after,
         "evidence": evidence,
         "alternatives": unique,
+        # What the picture evidence was actually taken from. A composition note
+        # derived from a 144p proxy must not read like a verified close-up.
+        "analysis": dict(scene_analysis.analysis) if scene_analysis else {},
+        "analysis_warnings": list(scene_analysis.warnings) if scene_analysis else [],
     }

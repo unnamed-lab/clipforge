@@ -144,7 +144,10 @@ def serialise_source(row: dict) -> dict:
     row = dict(row)
     row.pop("storage_path", None)
     row.pop("probe_json", None)
+    row.pop("content_hash", None)
     row["has_audio"] = bool(row.get("has_audio"))
+    row["has_video"] = bool(row.get("has_video", True))
+    row["download"] = _loads(row.pop("download_json", None), {})
     return row
 
 
@@ -156,7 +159,8 @@ class SourceRepository:
                relative_path: str, size_bytes: int, duration_ms: int, width: int | None,
                height: int | None, fps: float | None, has_audio: bool, video_codec: str | None,
                audio_codec: str | None, container: str | None, source_url: str | None,
-               probe: dict) -> dict:
+               probe: dict, has_video: bool = True, content_hash: str | None = None,
+               download: dict | None = None) -> dict:
         now = utc_now()
         with self.db.session() as conn:
             existing = conn.execute("SELECT id FROM sources WHERE project_id = ?", (project_id,)).fetchone()
@@ -164,23 +168,32 @@ class SourceRepository:
             conn.execute(
                 """
                 INSERT INTO sources(id, project_id, kind, original_name, storage_path, relative_path,
-                                    size_bytes, duration_ms, width, height, fps, has_audio, video_codec,
-                                    audio_codec, container, source_url, probe_json, created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                    size_bytes, duration_ms, width, height, fps, has_audio, has_video,
+                                    video_codec, audio_codec, container, source_url, content_hash,
+                                    download_json, probe_json, created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     kind=excluded.kind, original_name=excluded.original_name,
                     storage_path=excluded.storage_path, relative_path=excluded.relative_path,
                     size_bytes=excluded.size_bytes, duration_ms=excluded.duration_ms,
                     width=excluded.width, height=excluded.height, fps=excluded.fps,
-                    has_audio=excluded.has_audio, video_codec=excluded.video_codec,
+                    has_audio=excluded.has_audio, has_video=excluded.has_video,
+                    video_codec=excluded.video_codec,
                     audio_codec=excluded.audio_codec, container=excluded.container,
-                    source_url=excluded.source_url, probe_json=excluded.probe_json
+                    source_url=excluded.source_url, content_hash=excluded.content_hash,
+                    download_json=excluded.download_json, probe_json=excluded.probe_json
                 """,
                 (source_id, project_id, kind, original_name, storage_path, relative_path, size_bytes,
-                 duration_ms, width, height, fps, int(has_audio), video_codec, audio_codec, container,
-                 source_url, json.dumps(probe), now),
+                 duration_ms, width, height, fps, int(has_audio), int(has_video), video_codec, audio_codec,
+                 container, source_url, content_hash, json.dumps(download or {}), json.dumps(probe), now),
             )
         return self.get(project_id)
+
+    def set_content_hash(self, project_id: str, content_hash: str) -> None:
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE sources SET content_hash = ? WHERE project_id = ?", (content_hash, project_id)
+            )
 
     def get(self, project_id: str) -> dict:
         with self.db.session() as conn:
@@ -194,6 +207,86 @@ class SourceRepository:
             row = conn.execute("SELECT * FROM sources WHERE project_id = ?", (project_id,)).fetchone()
         return _row(row)
 
+
+# --------------------------------------------------------------------- media assets
+
+
+def serialise_media_asset(row: dict) -> dict:
+    data = dict(row)
+    data.pop("storage_path", None)
+    data["has_audio"] = bool(data.get("has_audio"))
+    data["settings"] = _loads(data.pop("settings_json", None), {})
+    return data
+
+
+class MediaAssetRepository:
+    """Derived renditions of a source: transcription audio and the analysis proxy.
+
+    One row per role: a second proxy for the same source replaces the first, and
+    the caller removes the superseded file. The original source is never stored
+    here, so an export path that reads only ``sources`` cannot pick a proxy by
+    accident.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def upsert(self, *, project_id: str, source_id: str, role: str, storage_path: str,
+               relative_path: str, size_bytes: int, duration_ms: int, width: int | None,
+               height: int | None, fps: float | None, has_audio: bool, video_codec: str | None,
+               audio_codec: str | None, container: str | None, settings: dict | None = None,
+               source_identity: str | None = None) -> dict:
+        with self.db.session() as conn:
+            existing = conn.execute(
+                "SELECT id FROM media_assets WHERE source_id = ? AND role = ?", (source_id, role)
+            ).fetchone()
+            asset_id = existing["id"] if existing else new_id()
+            conn.execute(
+                """
+                INSERT INTO media_assets(id, project_id, source_id, role, relative_path, storage_path,
+                                         size_bytes, duration_ms, width, height, fps, has_audio,
+                                         video_codec, audio_codec, container, settings_json,
+                                         source_identity, created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(source_id, role) DO UPDATE SET
+                    project_id=excluded.project_id, relative_path=excluded.relative_path,
+                    storage_path=excluded.storage_path, size_bytes=excluded.size_bytes,
+                    duration_ms=excluded.duration_ms, width=excluded.width, height=excluded.height,
+                    fps=excluded.fps, has_audio=excluded.has_audio, video_codec=excluded.video_codec,
+                    audio_codec=excluded.audio_codec, container=excluded.container,
+                    settings_json=excluded.settings_json, source_identity=excluded.source_identity
+                """,
+                (asset_id, project_id, source_id, role, relative_path, storage_path, size_bytes,
+                 duration_ms, width, height, fps, int(has_audio), video_codec, audio_codec, container,
+                 json.dumps(settings or {}), source_identity, utc_now()),
+            )
+        found = self.find(source_id, role)
+        assert found is not None
+        return found
+
+    def find(self, source_id: str, role: str) -> dict | None:
+        with self.db.session() as conn:
+            row = conn.execute(
+                "SELECT * FROM media_assets WHERE source_id = ? AND role = ?", (source_id, role)
+            ).fetchone()
+        return serialise_media_asset(dict(row)) if row else None
+
+    def list_for_project(self, project_id: str) -> list[dict]:
+        with self.db.session() as conn:
+            rows = conn.execute(
+                "SELECT * FROM media_assets WHERE project_id = ? ORDER BY role", (project_id,)
+            ).fetchall()
+        return [serialise_media_asset(dict(row)) for row in rows]
+
+    def delete(self, source_id: str, role: str) -> dict | None:
+        with self.db.session() as conn:
+            row = conn.execute(
+                "SELECT * FROM media_assets WHERE source_id = ? AND role = ?", (source_id, role)
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute("DELETE FROM media_assets WHERE id = ?", (row["id"],))
+        return dict(row)
 
 # ----------------------------------------------------------------------- transcripts
 
@@ -494,6 +587,7 @@ def serialise_job(row: dict) -> dict:
     data = dict(row)
     data["payload"] = _loads(data.pop("payload_json"), {})
     data["result"] = _loads(data.pop("result_json"), None)
+    data["metrics"] = _loads(data.pop("metrics_json", None), {})
     data["cancel_requested"] = bool(data.get("cancel_requested"))
     data["progress"] = round(float(data.get("progress") or 0), 1)
     return data
@@ -626,6 +720,14 @@ class JobRepository:
                 )
         return len(rows)
 
+    def set_metrics(self, job_id: str, metrics: dict) -> None:
+        """Attach measured numbers (bytes, speed, ETA) to a job for the UI."""
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE jobs SET metrics_json = ? WHERE id = ?", (json.dumps(metrics), job_id)
+            )
+
+
 
 # ---------------------------------------------------------------------------- renders
 
@@ -751,6 +853,7 @@ class Repositories:
         self.db = db
         self.projects = ProjectRepository(db)
         self.sources = SourceRepository(db)
+        self.media = MediaAssetRepository(db)
         self.transcripts = TranscriptRepository(db)
         self.runs = AnalysisRunRepository(db)
         self.candidates = CandidateRepository(db)

@@ -7,10 +7,10 @@ from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from clipforge.api.deps import get_state
-from clipforge.api.models import UrlImportRequest
+from clipforge.api.models import UrlImportRequest, UrlInspectRequest
 from clipforge.db.repositories import serialise_source
-from clipforge.errors import AppError, NotFound, ValidationFailed
-from clipforge.media.importer import ingest_upload
+from clipforge.errors import AppError, JobFailed, NotFound, ValidationFailed
+from clipforge.media.importer import ingest_upload, inspect_remote
 from clipforge.security.urls import validate_url_shape
 from clipforge.storage.base import StorageObjectMissing, ensure_local
 from clipforge.storage.workspace import ensure_layout
@@ -29,6 +29,28 @@ async def upload_source(project_id: str, request: Request, file: UploadFile = Fi
     return {"source": serialise_source(record)}
 
 
+@router.post("/{project_id}/sources/url/inspect")
+def inspect_url(project_id: str, payload: UrlInspectRequest, request: Request) -> dict:
+    """Report the published formats and what the chosen quality would fetch.
+
+    This reads metadata only: nothing is downloaded, so the user can see the
+    real renditions and an approximate size before committing.
+    """
+    state = get_state(request)
+    state.repos.projects.get(project_id)
+    validated = validate_url_shape(payload.url)
+    try:
+        return inspect_remote(
+            settings=state.settings,
+            validated=validated,
+            quality=payload.quality,
+            processing=payload.processing,
+            proxy_height=payload.proxy_height,
+        )
+    except JobFailed as exc:
+        raise AppError(exc.message, code=exc.code, status_code=422) from exc
+
+
 @router.post("/{project_id}/sources/url")
 def import_url(project_id: str, payload: UrlImportRequest, request: Request) -> dict:
     state = get_state(request)
@@ -45,7 +67,13 @@ def import_url(project_id: str, payload: UrlImportRequest, request: Request) -> 
     job = state.queue.enqueue(
         project_id=project_id,
         job_type="url_import",
-        payload={"url": validated.original, "host": validated.host},
+        payload={
+            "url": validated.original,
+            "host": validated.host,
+            "quality": payload.quality,
+            "processing": payload.processing,
+            "proxy_height": payload.proxy_height,
+        },
     )
     return {"job": job, "deduplicated": False}
 
@@ -59,11 +87,43 @@ def get_media(project_id: str, request: Request) -> dict:
         return {"source": None}
     paths = ensure_layout(state.settings, project_id)
     waveform = paths / "analysis" / "waveform.png"
+    assets = {asset["role"]: asset for asset in state.repos.media.list_for_project(project_id)}
+    proxy = assets.get("proxy")
     return {
         "source": serialise_source(source),
+        "assets": {
+            "audio": assets.get("audio"),
+            # The proxy is a scrubbing aid only. Exports always read the source.
+            "proxy": proxy,
+        },
         "waveform": waveform.exists(),
         "stream_url": f"/api/projects/{project_id}/media/stream",
+        "proxy_stream_url": (
+            f"/api/projects/{project_id}/media/proxy/stream" if proxy else None
+        ),
     }
+
+
+@router.get("/{project_id}/media/proxy/stream")
+def stream_proxy(project_id: str, request: Request) -> StreamingResponse:
+    state = get_state(request)
+    state.repos.projects.get(project_id)
+    proxy = next(
+        (asset for asset in state.repos.media.list_for_project(project_id) if asset["role"] == "proxy"),
+        None,
+    )
+    if proxy is None:
+        raise NotFound("This project has no analysis proxy")
+    try:
+        path = ensure_local(
+            state.storage,
+            proxy.get("relative_path"),
+            legacy_path=proxy.get("storage_path"),
+            missing_message="The analysis proxy is missing from this project",
+        )
+    except StorageObjectMissing as exc:
+        raise NotFound(exc.message) from exc
+    return _ranged_response(request, path)
 
 
 @router.get("/{project_id}/media/stream")

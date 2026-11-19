@@ -75,7 +75,7 @@ def _rotation(stream: dict) -> int:
         return 0
 
 
-def probe(path: Path, *, timeout_seconds: float = 60) -> MediaInfo:
+def probe(path: Path, *, timeout_seconds: float = 60, allow_audio_only: bool = False) -> MediaInfo:
     ffprobe = require("ffprobe")
     if not path.exists():
         raise Unsupported("The uploaded file could not be found after saving it", code="upload_missing")
@@ -114,12 +114,13 @@ def probe(path: Path, *, timeout_seconds: float = 60) -> MediaInfo:
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
     if video is None:
-        raise Unsupported(
-            "That file has no video stream. Audio-only files are not supported yet.",
-            code="no_video_stream",
-        )
+        if not allow_audio_only or audio is None:
+            raise Unsupported(
+                "That file has no video stream. Audio-only files are not supported yet.",
+                code="no_video_stream",
+            )
 
-    video_codec = (video.get("codec_name") or "").lower() or None
+    video_codec = ((video.get("codec_name") or "").lower() or None) if video is not None else None
     if video_codec and video_codec not in DECODABLE_VIDEO_CODECS:
         raise Unsupported(f"The video codec ({video_codec}) is not supported", code="unsupported_codec")
 
@@ -128,7 +129,8 @@ def probe(path: Path, *, timeout_seconds: float = 60) -> MediaInfo:
         raise Unsupported(f"The audio codec ({audio_codec}) is not supported", code="unsupported_codec")
 
     duration = 0.0
-    for candidate in (fmt.get("duration"), video.get("duration"), audio.get("duration") if audio else None):
+    for candidate in (fmt.get("duration"), video.get("duration") if video else None,
+                      audio.get("duration") if audio else None):
         try:
             value = float(candidate)
         except (TypeError, ValueError):
@@ -139,13 +141,13 @@ def probe(path: Path, *, timeout_seconds: float = 60) -> MediaInfo:
     if duration <= 0:
         raise Unsupported("The duration of that file could not be determined", code="invalid_duration")
 
-    width = video.get("width")
-    height = video.get("height")
-    rotation = abs(_rotation(video)) % 360
+    width = video.get("width") if video else None
+    height = video.get("height") if video else None
+    rotation = abs(_rotation(video)) % 360 if video else 0
     if rotation in {90, 270} and width and height:
         width, height = height, width
 
-    fps = _fraction(video.get("avg_frame_rate")) or _fraction(video.get("r_frame_rate"))
+    fps = (_fraction(video.get("avg_frame_rate")) or _fraction(video.get("r_frame_rate"))) if video else None
 
     try:
         size_bytes = int(fmt.get("size") or path.stat().st_size)
@@ -163,7 +165,7 @@ def probe(path: Path, *, timeout_seconds: float = 60) -> MediaInfo:
         height=int(height) if height else None,
         fps=fps,
         has_audio=audio is not None,
-        has_video=True,
+        has_video=video is not None,
         video_codec=video_codec,
         audio_codec=audio_codec,
         audio_channels=int(audio["channels"]) if audio and audio.get("channels") else None,

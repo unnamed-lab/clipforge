@@ -15,12 +15,9 @@ from typing import Callable
 from clipforge.media.process import ProcessCancelled, ProcessFailed, ProcessTimeout, require, run
 from clipforge.rendering.spec import CompositionDecision, Rect, RenderSpec, SegmentSpan
 
-X264_PRESET = "veryfast"
-CRF = 20
-AUDIO_BITRATE = "160k"
 AUDIO_RATE = 48_000
-SILENCE_LABEL = "anullsrc=channel_layout=stereo:sample_rate=48000"
 LOGO_MARGIN = 48
+SILENCE_LABEL = "anullsrc=channel_layout=stereo:sample_rate=48000"
 
 
 @dataclass
@@ -36,11 +33,16 @@ def _seconds(ms: int) -> str:
 
 
 def _fps(spec: RenderSpec, source_fps: float | None) -> int:
-    if spec.video.fps:
-        return int(spec.video.fps)
-    if source_fps and 15 <= source_fps <= 60:
-        return int(round(source_fps))
-    return 30
+    requested = spec.video.fps
+    if requested:
+        fps = int(requested)
+    elif source_fps and 15 <= source_fps <= 60:
+        fps = int(round(source_fps))
+    else:
+        fps = 30
+    if spec.encode.max_fps:
+        fps = min(fps, int(spec.encode.max_fps))
+    return max(15, fps)
 
 
 def _even(value: float) -> int:
@@ -282,7 +284,7 @@ def build_command(
     source_height: int | None = None,
 ) -> RenderCommand:
     ffmpeg = require("ffmpeg")
-    width, height = spec.video.dimensions
+    width, height = spec.output_dimensions
     fps = _fps(spec, source_fps)
     total_ms = spec.total_duration_ms
     segment_count = len(spec.segments)
@@ -346,12 +348,17 @@ def build_command(
         else ["[vcapped]null[vout]"]
     )
 
+    codec_args = ["-c:v", spec.encode.ffmpeg_codec]
+    if spec.encode.codec == "h264":
+        codec_args += ["-preset", spec.encode.x264_preset, "-profile:v", "high", "-level", "4.2"]
+    else:
+        codec_args += ["-preset", "medium", "-tag:v", "hvc1"]
     args += [
         "-filter_complex", ";".join(filters),
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", X264_PRESET, "-crf", str(CRF),
-        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.2",
-        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE), "-ac", "2",
+        *codec_args, "-crf", str(spec.encode.crf),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", spec.encode.audio_bitrate, "-ar", str(AUDIO_RATE), "-ac", "2",
         "-movflags", "+faststart",
         "-map_metadata", "-1",
         "-progress", "pipe:1", "-nostats",

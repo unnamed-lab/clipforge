@@ -12,12 +12,14 @@ from typing import Callable
 from clipforge.config import Settings
 from clipforge.db.repositories import Repositories
 from clipforge.errors import AppError, JobFailed
+from clipforge.media.assets import visual_input
 from clipforge.media.process import ProcessCancelled
 from clipforge.media.probe import probe
 from clipforge.quality.boundaries import review_ending
 from clipforge.quality.gate import run_export_gate
 from clipforge.ranking.sentences import build_transcript_model
 from clipforge.rendering.composition import expand_composition
+from clipforge.rendering.encode import validate_encoders
 from clipforge.rendering.ffmpeg import build_command, execute
 from clipforge.rendering.fonts import copy_fonts, resolve_font
 from clipforge.rendering.spec import RenderSpec
@@ -101,6 +103,8 @@ def _ending_review_for_render(
     source: dict,
     source_path: Path,
     cache_dir: Path,
+    scene_fps: float | None = None,
+    analysis_height: int = 144,
 ) -> dict | None:
     if not candidate_id:
         return None
@@ -124,6 +128,9 @@ def _ending_review_for_render(
         source_path=source_path,
         source_duration_ms=int(source["duration_ms"]),
         cache_dir=cache_dir,
+        scene_fps=scene_fps,
+        analysis_height=analysis_height,
+        source_height=source.get("height"),
     )
     repos.candidates.set_boundary(project_id, candidate_id, review)
     return review
@@ -185,6 +192,27 @@ def _prepare_assets(spec: RenderSpec, repos: Repositories, storage: StorageBacke
     return warnings
 
 
+def _export_resolution_warnings(source: dict, spec: RenderSpec) -> list[str]:
+    """Say when the retained source cannot support the requested export size.
+
+    The retained source is the only export input. A proxy is smaller by design,
+    so using one here would silently throw away detail the user chose to keep.
+    """
+    out_width, out_height = spec.output_dimensions
+    source_width = int(source.get("width") or 0)
+    source_height = int(source.get("height") or 0)
+    if not source_width or not source_height:
+        return []
+    if out_width <= source_width and out_height <= source_height:
+        return []
+    factor = max(out_width / source_width, out_height / source_height)
+    return [
+        f"The export is {out_width}×{out_height} but the retained source is "
+        f"{source_width}×{source_height}. The encoder upscales by about {factor:.2f}×, so no extra "
+        "detail is recovered. Import a higher-quality source for a sharper export."
+    ]
+
+
 def perform_render(
     repos: Repositories,
     settings: Settings,
@@ -205,6 +233,16 @@ def perform_render(
     except ValueError as exc:
         raise JobFailed("invalid_render_spec", str(exc)) from exc
     _policy_checks(spec)
+    if not source.get("has_video"):
+        raise JobFailed(
+            "no_video_stream",
+            "This project's source has no video stream, so it cannot be rendered. "
+            "Import the video again to export clips.",
+        )
+    # A codec this FFmpeg cannot run would fail halfway through a long encode.
+    # Check the build first and fall back with an explicit note.
+    spec.encode, encoder_note = validate_encoders(spec.encode)
+    encode_warnings = [encoder_note] if encoder_note else []
 
     paths = ensure_layout(settings, project_id)
     clear_tmp(settings, project_id)
@@ -223,7 +261,11 @@ def perform_render(
     ensure_space(settings, paths, required_bytes=400 * 1024 * 1024)
     logo_requested = bool(spec.logo.enabled)
     on_stage("assets", 2, "Checking brand assets and audio policy")
-    warnings = _prepare_assets(spec, repos, storage, work)
+    warnings = [
+        *encode_warnings,
+        *_export_resolution_warnings(source, spec),
+        *_prepare_assets(spec, repos, storage, work),
+    ]
     overlay_report = {
         "requested": logo_requested,
         "applied": bool(spec.logo.enabled and spec.logo.asset_name == LOGO_FILENAME),
@@ -233,13 +275,18 @@ def perform_render(
     }
 
     on_stage("compose", 2.5, "Planning the layout from scene changes")
+    download = source.get("download") or {}
+    scene_fps = (download.get("processing") or {}).get("scene_fps")
+    analysis_path, analysis_height = visual_input(repos, storage, source, source_path)
     plan = expand_composition(
         spec,
-        source_path,
+        analysis_path,
         source.get("width"),
         source.get("height"),
         source_duration_ms=int(source["duration_ms"]),
         cache_dir=paths / "analysis" / "scenes",
+        scene_fps=scene_fps,
+        analysis_height=analysis_height,
         on_progress=lambda index, total: on_stage(
             "compose",
             2.5 + (index / max(1, total)) * 1.5,
@@ -264,7 +311,7 @@ def perform_render(
         else:
             words = _words_for_spans(transcript["segments"], spans)
             if any(words):
-                width, height = spec.video.dimensions
+                width, height = spec.output_dimensions
                 captions = build_captions(spans, words, spec, width, height, compositions)
                 caption_report = captions.report.to_dict()
                 warnings.extend(captions.report.warnings)
@@ -324,8 +371,10 @@ def perform_render(
         project_id=project_id,
         candidate_id=render.get("candidate_id"),
         source=source,
-        source_path=source_path,
+        source_path=analysis_path,
         cache_dir=paths / "analysis" / "scenes",
+        scene_fps=scene_fps,
+        analysis_height=analysis_height,
     )
     gate = run_export_gate(
         output_path=output,

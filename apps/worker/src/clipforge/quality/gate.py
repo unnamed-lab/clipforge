@@ -80,7 +80,7 @@ def run_export_gate(
     ending_review: dict | None = None,
     info: MediaInfo | None = None,
 ) -> dict:
-    expected_width, expected_height = spec.video.dimensions
+    expected_width, expected_height = spec.output_dimensions
     expected_ms = spec.total_duration_ms
     checks: list[dict] = []
 
@@ -119,7 +119,30 @@ def run_export_gate(
         )
     )
 
+    source_width = int(source.get("width") or 0)
+    source_height = int(source.get("height") or 0)
+    if source_width and source_height:
+        upscaled = expected_width > source_width or expected_height > source_height
+        checks.append(
+            _check(
+                "source_resolution",
+                "Source resolution supports the export",
+                "warn" if upscaled else "pass",
+                (
+                    f"The export is {expected_width}x{expected_height} from a "
+                    f"{source_width}x{source_height} source; the encoder upscales and no extra "
+                    "detail is recovered."
+                )
+                if upscaled else
+                f"The {source_width}x{source_height} source covers the {expected_width}x{expected_height} export.",
+                source=[source_width, source_height],
+                export=[expected_width, expected_height],
+            )
+        )
+
     target_fps = float(spec.video.fps or source.get("fps") or info.fps or 0)
+    if spec.encode.max_fps:
+        target_fps = min(target_fps, float(spec.encode.max_fps)) if target_fps else float(spec.encode.max_fps)
     if target_fps and info.fps:
         difference = abs(info.fps - target_fps)
         checks.append(

@@ -24,13 +24,41 @@ CREATE TABLE IF NOT EXISTS sources (
     height          INTEGER,
     fps             REAL,
     has_audio       INTEGER NOT NULL DEFAULT 0,
+    has_video       INTEGER NOT NULL DEFAULT 1,
     video_codec     TEXT,
     audio_codec     TEXT,
     container       TEXT,
     source_url      TEXT,
+    content_hash    TEXT,
+    download_json   TEXT NOT NULL DEFAULT '{}',
     probe_json      TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL
 );
+
+-- Derived renditions of one source. A proxy is an analysis aid only: the export
+-- path always reads the original source row above.
+CREATE TABLE IF NOT EXISTS media_assets (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_id       TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL,
+    relative_path   TEXT NOT NULL,
+    storage_path    TEXT NOT NULL,
+    size_bytes      INTEGER NOT NULL DEFAULT 0,
+    duration_ms     INTEGER NOT NULL DEFAULT 0,
+    width           INTEGER,
+    height          INTEGER,
+    fps             REAL,
+    has_audio       INTEGER NOT NULL DEFAULT 0,
+    video_codec     TEXT,
+    audio_codec     TEXT,
+    container       TEXT,
+    settings_json   TEXT NOT NULL DEFAULT '{}',
+    source_identity TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_media_assets_role ON media_assets(source_id, role);
 
 CREATE TABLE IF NOT EXISTS transcripts (
     id                    TEXT PRIMARY KEY,
@@ -99,6 +127,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     attempts         INTEGER NOT NULL DEFAULT 0,
     payload_json     TEXT NOT NULL DEFAULT '{}',
     result_json      TEXT,
+    metrics_json     TEXT NOT NULL DEFAULT '{}',
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
     started_at       TEXT,
