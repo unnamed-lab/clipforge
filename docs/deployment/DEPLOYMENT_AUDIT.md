@@ -194,7 +194,7 @@ Render Private Service (FastAPI API + job queue + FFmpeg, exactly 1 instance)
 4. Start Compose; assert `/api/health` on both services; assert web `/api/health` proxies to the worker.
 5. FFmpeg/FFprobe smoke inside the worker image using a generated 1 s test clip (no model download).
 6. Upload a small file through the web proxy into the worker and confirm the stored source and a queued job.
-7. Restart the worker mid-queue and confirm interrupted jobs surface as failed/retryable.
+7. Restart the worker mid-queue and confirm an interrupted download is requeued and resumes, while other interrupted jobs surface as failed/retryable.
 8. Record actual results in the final report; anything not run is called out explicitly.
 
 ---

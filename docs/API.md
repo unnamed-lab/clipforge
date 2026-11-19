@@ -133,7 +133,7 @@ Long-running work is queued and executed by one consumer thread. HTTP requests r
 | Field | Notes |
 | --- | --- |
 | `type` | `analysis`, `render` or `url_import`. |
-| `state` | `queued`, `running`, `completed`, `failed` or `cancelled`. |
+| `state` | `queued`, `running`, `waiting`, `completed`, `failed` or `cancelled`. `waiting` means a transient failure parked the job until `next_attempt_at`. |
 | `stage` | Human-readable stage. Analysis stages are `prepare`, `audio`, `transcribe`, `candidates`, `rank`, `boundaries`, `done`. Render stages are `assets`, `compose`, `rendering`, `validating`, `done`; URL import uses `validating` and other import stages. |
 | `progress` | `0`–`100`. Advisory, not a time estimate. |
 | `cancel_requested` | Set when cancellation is requested; the handler checks it between stages and during subprocesses. |
@@ -142,9 +142,10 @@ Long-running work is queued and executed by one consumer thread. HTTP requests r
 Rules:
 
 - FIFO, one job at a time.
-- Enqueueing a job of the same `project_id` + `type` while one is queued or running returns the active job with `"deduplicated": true` instead of creating another.
-- Jobs interrupted by a worker restart are marked `failed` with `error_code: "worker_restarted"`. There is no automatic resume.
-- Retry requeues a terminal job. Retrying a queued or running job returns `409 conflict`.
+- Enqueueing a job of the same `project_id` + `type` while one is queued, running or waiting returns the active job with `"deduplicated": true` instead of creating another.
+- A transient failure a handler marks as retryable parks the job as `waiting` until `next_attempt_at` instead of ending it. The worker retries it by itself, with the wait growing from a minute to half an hour; after six parked attempts it fails normally.
+- A download interrupted by a worker restart is requeued and resumes from its partial file. Other interrupted job types are marked `failed` with `error_code: "worker_restarted"`, because their partial output cannot be trusted.
+- Retry requeues a terminal or waiting job. Retrying a queued or running job returns `409 conflict`.
 - Cancelling a finished job returns `409 conflict`.
 
 ---

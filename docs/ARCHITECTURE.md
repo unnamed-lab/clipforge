@@ -93,7 +93,7 @@ Design notes:
 
 ## 4. Job model
 
-States: `queued → running → completed | failed | cancelled`.
+States: `queued → running → (waiting → running)* → completed | failed | cancelled`.
 
 - One consumer thread, FIFO, `max_workers=1`. Every job runs in that thread; blocking C extensions (ctranslate2, FFmpeg) are safe there and the API stays responsive.
 - Progress is written to the DB at stage transitions and at real measurement points:
@@ -101,8 +101,9 @@ States: `queued → running → completed | failed | cancelled`.
   - rendering: FFmpeg `-progress pipe:1` `out_time_us / expected_duration`
   - download import: yt-dlp progress hook bytes / total
 - Cancellation is cooperative *between* stages and preemptive *inside* FFmpeg (the runner kills the process group on the cancel event). cancellation leaves the source untouched and the job in `cancelled`.
-- Retry re-enqueues the same job row (`attempts += 1`) after clearing the error. Retry is refused while a job for the same project+type is queued or running, so double-clicking "Analyse" cannot start two ASR runs.
-- Startup sweep: any job left `running` by a hard kill is marked `failed` with `worker_restarted`, and its cleanup runs. This is what "persistent queue" buys us.
+- Retry re-enqueues the same job row (`attempts += 1`) after clearing the error. Retry is refused while a job for the same project+type is queued, running or waiting, so double-clicking "Analyse" cannot start two ASR runs.
+- A transient failure a handler marks retryable parks the job in `waiting` with a `next_attempt_at` due time; the queue claims it again when due, so an outage costs a wait rather than the work. Six parked attempts (1, 2, 4, 8, 16, then 30 minutes) bound the wait before the job fails for real.
+- Startup sweep: interrupted downloads go back to `queued` and resume from their own fragments. Any other job left `running` by a hard kill is marked `failed` with `worker_restarted`, and its cleanup runs.
 
 ## 5. Provider interfaces
 
@@ -158,7 +159,7 @@ Local-only threat model: the machine is trusted, the *content* is not.
 | No audio stream | Import succeeds with `has_audio=false`; analysis rejects with a clear message |
 | LLM endpoint unreachable | Analysis completes on baseline scores and records a warning |
 | FFmpeg render fails | Job fails with the last 40 lines of stderr; source and analysis untouched |
-| Worker crash mid-job | On restart the job is marked failed and retryable |
+| Worker crash mid-job | Downloads are requeued and resume on restart; other job types are marked failed and retryable |
 | Disk full | Pre-flight check refuses the job with `insufficient_disk` |
 
 Nothing in this table silently substitutes sample data for a failed operation.

@@ -77,12 +77,12 @@ No licence file is present in the repository yet. Treat the source as all rights
 ## Operations and scale
 
 - **One worker process, one SQLite writer.** Do not run two workers against the same data directory. Do not mount the SQLite file on a network filesystem. The queue is a single-consumer FIFO, so one slow transcription delays every later job, including renders.
-- **No automatic resume.** Jobs that were running when the worker stopped are marked failed (`worker_restarted`). They must be retried manually. Partial renders are discarded.
+- **Resume is download-only.** A URL import interrupted by an outage or a worker restart resumes from the bytes it already fetched. Transcription and rendering have no checkpoint: an interrupted job of those types is marked failed (`worker_restarted`) and starts over when retried. Partial renders are discarded.
 - **Cancellation is cooperative.** FFmpeg/ffprobe subprocesses are terminated and handlers check between stages. A blocking library call may take time to notice.
-- **Retry runs the job again from the start.** There is no checkpointing inside transcription or rendering.
+- **Retry usually runs the job again from the start.** The exception is a URL import, which resumes whatever it still has on disk. There is no checkpointing inside transcription or rendering.
 - **Disk usage is real.** Sources are retained for renders. Proxies, audio, waveform images, model caches, scene thumbnails, drafts and finished renders accumulate under `data/` or the Compose volume. The reserve floor prevents the disk from reaching zero; it does not clean up for you.
 - **Upload is a single multipart request.** There is no direct browser-to-storage upload and no resumable upload. Large files consume worker memory and request time, and are limited by `CLIPFORGE_MAX_UPLOAD_MB`.
-- **URL import depends on `yt-dlp` and the source site.** It can break when a site changes, when a video is region-locked, or when a rendition is unavailable. Inspection is metadata-only and its size is approximate.
+- **URL import depends on `yt-dlp` and the source site.** It can break when a site changes, when a video is region-locked, or when a rendition is unavailable. Inspection is metadata-only and its size is approximate. A download keeps a sidecar resume manifest next to its fragments; fragments without a matching manifest are discarded rather than appended to.
 - **No pagination.** Project lists, candidate lists and library lists return full result sets. This is fine for a personal library; it is not designed for thousands of projects.
 - **SQLite schema changes are additive by hand.** There is no migration framework. New columns are declared in `db/connection.py` and applied at startup with `ALTER TABLE` when missing. Destructive schema changes require a manual migration and a backup.
 - **Model download requires network access.** A first run without a cached model fails if the host is offline. The worker image deliberately contains no models; Compose downloads whichever model is configured (the Compose default is `base`) into the data volume on first use.
