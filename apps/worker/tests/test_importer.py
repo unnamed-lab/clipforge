@@ -399,6 +399,97 @@ def test_a_retry_resumes_the_file_an_interrupted_run_started(
     # then: it continued the interrupted file instead of starting a new download
     assert record["kind"] == "url"
     assert Path(targets[-1].replace("%(ext)s", "f399.mp4.part")) == fragment
+    # and the resume record was retired with the finished download
+    assert list(paths.glob("source/*.resume.json")) == []
+
+
+def _watching_module(state: _State, observed: list[bool], fragment: Path, *, error: str):
+    """A fake extractor that reports whether a fragment was present when it ran."""
+
+    class _WatchingYDL(_FakeYDL):
+        def extract_info(self, url: str, download: bool = False):
+            if download:
+                observed.append(fragment.exists())
+                raise RuntimeError(error)
+            return INFO
+
+    class _Module:
+        def YoutubeDL(self, options: dict) -> _WatchingYDL:  # noqa: N802 - mirrors yt_dlp's API
+            return _WatchingYDL(options, state)
+
+    return _Module()
+
+
+def test_a_fragment_from_another_rendition_is_not_resumed(
+    monkeypatch, wired, repos, settings, project, storage
+):
+    # given: bytes left by a download of a different rendition
+    paths = ensure_layout(settings, project["id"])
+    stem = importer._download_stem(paths, url=URL, selector="136+140")
+    fragment = Path(f"{stem}.f399.mp4.part")
+    fragment.write_bytes(b"x" * 4096)
+    importer._write_manifest(stem, {
+        "version": importer.RESUME_MANIFEST_VERSION,
+        "url": URL,
+        "selector": "134+140",
+        "started_at": "2026-01-01T00:00:00Z",
+    })
+    observed: list[bool] = []
+    monkeypatch.setattr(
+        importer,
+        "_yt_dlp_module",
+        lambda: _watching_module(wired, observed, fragment, error="Private video"),
+    )
+
+    # when
+    with pytest.raises(JobFailed):
+        download_remote(repos, settings, storage, project_id=project["id"], validated=_validated())
+
+    # then: the bytes were removed before the transfer, not appended to
+    assert observed == [False]
+    assert not fragment.exists()
+
+
+def test_a_fragment_without_a_manifest_is_not_resumed(
+    monkeypatch, wired, repos, settings, project, storage
+):
+    # given: bytes whose source and rendition cannot be proven
+    paths = ensure_layout(settings, project["id"])
+    stem = importer._download_stem(paths, url=URL, selector="136+140")
+    fragment = Path(f"{stem}.f399.mp4.part")
+    fragment.write_bytes(b"x" * 4096)
+    observed: list[bool] = []
+    monkeypatch.setattr(
+        importer,
+        "_yt_dlp_module",
+        lambda: _watching_module(wired, observed, fragment, error="Private video"),
+    )
+
+    # when
+    with pytest.raises(JobFailed):
+        download_remote(repos, settings, storage, project_id=project["id"], validated=_validated())
+
+    # then
+    assert observed == [False]
+
+
+def test_a_download_shorter_than_declared_is_discarded(
+    monkeypatch, wired, repos, settings, project, storage
+):
+    # given: the transfer completes but the file is not the declared length
+    short = _media_info()
+    short.duration_ms = 30_000
+    monkeypatch.setattr(importer, "probe", lambda path, **kwargs: short)
+
+    # when
+    with pytest.raises(JobFailed) as raised:
+        download_remote(repos, settings, storage, project_id=project["id"], validated=_validated())
+
+    # then: nothing unverified is stored, and a retry starts clean
+    assert raised.value.code == "url_download_failed"
+    assert repos.sources.find_optional(project["id"]) is None
+    paths = ensure_layout(settings, project["id"])
+    assert list(paths.glob("source/*")) == []
 
 
 def test_transient_retries_stop_at_the_attempt_cap(

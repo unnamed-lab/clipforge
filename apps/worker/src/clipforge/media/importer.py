@@ -45,7 +45,7 @@ from clipforge.media.proxy import build_proxy, proxy_dimensions
 from clipforge.security.paths import display_name
 from clipforge.security.urls import ValidatedUrl
 from clipforge.storage.base import StorageBackend
-from clipforge.storage.workspace import ensure_layout, ensure_space
+from clipforge.storage.workspace import ensure_layout, ensure_space, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,13 @@ DOWNLOAD_RETRY_BUDGET_SECONDS = 30 * 60
 DOWNLOAD_RETRY_MAX_ATTEMPTS = 40
 RETRY_BASE_SECONDS = 2.0
 RETRY_MAX_SECONDS = 60.0
+# A partial file is only safe to append to when it belongs to the same source
+# and rendition. The manifest records that identity next to the fragments.
+RESUME_MANIFEST_VERSION = 1
+# Sites round declared durations to whole seconds; a truncated download is
+# usually wrong by far more than this, so the tolerance stays forgiving.
+DURATION_TOLERANCE_MS = 3000
+DURATION_TOLERANCE_RATIO = 0.02
 SOCKET_TIMEOUT_SECONDS = 30
 # A single long-lived connection to a video CDN is routinely throttled to a few
 # KB/s. Chunked, parallel fragment requests keep a multi-hundred-MB download
@@ -481,6 +488,59 @@ def _partial_bytes(stem: Path) -> int:
     return total
 
 
+def _manifest_path(stem: Path) -> Path:
+    return stem.parent / f"{stem.name}.resume.json"
+
+
+def _read_manifest(stem: Path, *, url: str, selector: str) -> dict | None:
+    """The identity of the fragments on disk, when they belong to this download."""
+    try:
+        stored = json.loads(_manifest_path(stem).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(stored, dict) or stored.get("version") != RESUME_MANIFEST_VERSION:
+        return None
+    if stored.get("url") != url or stored.get("selector") != selector:
+        return None
+    return stored
+
+
+def _discard_fragments(stem: Path) -> None:
+    """Remove bytes whose provenance cannot be proven."""
+    for path in stem.parent.glob(f"{stem.name}*.part"):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove an untrusted partial download")
+    try:
+        _manifest_path(stem).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove a download resume manifest")
+
+
+def _write_manifest(stem: Path, payload: dict) -> None:
+    try:
+        write_json_atomic(_manifest_path(stem), payload)
+    except OSError:
+        # A download without a manifest still works; it just cannot be resumed
+        # safely later, which is the conservative outcome.
+        logger.warning("Could not record the download resume manifest")
+
+
+def _duration_tolerance_ms(declared_ms: int) -> int:
+    return max(DURATION_TOLERANCE_MS, int(declared_ms * DURATION_TOLERANCE_RATIO))
+
+
+def _retire_manifest_if_empty(stem: Path) -> None:
+    """A manifest only describes fragments; without any it is noise."""
+    if any(stem.parent.glob(f"{stem.name}*.part")):
+        return
+    try:
+        _manifest_path(stem).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove an unused download resume manifest")
+
+
 def _keeps_partial(exc: BaseException) -> bool:
     """Whether a failure leaves the partial file usable for the next attempt."""
     if getattr(exc, "code", None) == "cancelled":
@@ -739,7 +799,7 @@ def download_remote(
 
     report("inspecting", None, "Inspecting the source and its published formats", {"indeterminate": True})
     info = _extract_info(yt_dlp, settings, validated.resolved, should_cancel=should_cancel)
-    _validate_info(settings, info)
+    declared_duration_ms = _validate_info(settings, info)
 
     try:
         plan = resolve_plan(mode=processing, quality=quality, proxy_height=proxy_height)
@@ -792,6 +852,18 @@ def download_remote(
 
     title = str(info.get("title") or "Imported video")
     target_stem = _download_stem(paths, url=validated.resolved, selector=choice.selector)
+    # Only fragments proven to belong to this source and rendition may be
+    # appended to; anything else is deleted before the transfer starts.
+    resume = _read_manifest(target_stem, url=validated.resolved, selector=choice.selector)
+    if resume is None:
+        _discard_fragments(target_stem)
+    _write_manifest(target_stem, {
+        "version": RESUME_MANIFEST_VERSION,
+        "url": validated.resolved,
+        "selector": choice.selector,
+        "declared_duration_ms": declared_duration_ms,
+        "started_at": (resume or {}).get("started_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
     # Keep this download's own fragments: they are what lets a retry resume.
     cleanup_partials(settings, project_id, keep=target_stem.name)
     # Remote size is unknown until the formats are read; reserve a sane budget,
@@ -862,13 +934,17 @@ def download_remote(
                            should_cancel=should_cancel)
     except JobFailed as exc:
         # A connection drop is recoverable: the fragments stay for the retry.
-        if not _keeps_partial(exc):
+        if _keeps_partial(exc):
+            _retire_manifest_if_empty(target_stem)
+        else:
             _clean_target_files(target_stem)
             cleanup_partials(settings, project_id)
         raise
     except Exception as exc:
         mapped = _map_error(exc, context="url_download_failed")
-        if not (_keeps_partial(mapped) or _is_transient(exc)):
+        if _keeps_partial(mapped) or _is_transient(exc):
+            _retire_manifest_if_empty(target_stem)
+        else:
             _clean_target_files(target_stem)
             cleanup_partials(settings, project_id)
         raise mapped from exc
@@ -894,6 +970,27 @@ def download_remote(
     if size < 16 * 1024:
         _clean_target_files(target_stem)
         raise JobFailed("url_download_failed", "The downloaded file is too small to be a video.")
+
+    # A resumed transfer is only correct if it appended to its own bytes. The
+    # declared duration is the cheapest independent check that it did.
+    try:
+        inspected = probe(filepath, allow_audio_only=True)
+    except Exception as exc:
+        _clean_target_files(target_stem)
+        cleanup_partials(settings, project_id)
+        raise JobFailed(
+            "url_download_failed",
+            "The downloaded file could not be read, so it was discarded. Retry to fetch it again.",
+        ) from exc
+    if abs(inspected.duration_ms - declared_duration_ms) > _duration_tolerance_ms(declared_duration_ms):
+        _clean_target_files(target_stem)
+        cleanup_partials(settings, project_id)
+        failure = JobFailed(
+            "url_download_failed",
+            "The downloaded file is not the length the source declared, so it was discarded. Retry to fetch it again.",
+        )
+        failure.retryable = True
+        raise failure
 
     elapsed = time.monotonic() - started
     summary = _download_summary(choice, plan, size_bytes=size, elapsed_seconds=elapsed,
@@ -1006,7 +1103,7 @@ def cleanup_partials(settings: Settings, project_id: str, *, keep: str | None = 
         paths = ensure_layout(settings, project_id)
     except Exception:
         return
-    for pattern in ("*.part", "*.ytdl", "*.temp"):
+    for pattern in ("*.part", "*.ytdl", "*.temp", "*.resume.json"):
         for path in paths.glob(f"source/{pattern}"):
             if keep and path.name.startswith(keep):
                 continue
