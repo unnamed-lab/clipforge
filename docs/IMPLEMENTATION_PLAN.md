@@ -1,6 +1,8 @@
-# Clipforge — Implementation Plan
+# Clipforge - Implementation Plan
 
-Status: **Sprint 1 complete (Milestone 1–3 core slice)**. Last updated: 2026-11-15.
+> Historical record. This plan describes the original sprint and has not been rewritten as later work landed. For current behaviour, use [README](../README.md), [User guide](USER_GUIDE.md), [API reference](API.md) and [Known limitations](KNOWN_LIMITATIONS.md).
+
+Status: **Sprint 1 complete (Milestone 1-3 core slice)**. Last updated: 2026-11-15.
 
 ## 1. Environment audit (recorded before any code was written)
 

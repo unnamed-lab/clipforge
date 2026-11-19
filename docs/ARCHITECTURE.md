@@ -1,4 +1,6 @@
-# Clipforge — Architecture
+# Clipforge - Architecture
+
+> Status: the service boundaries, security rules and job model below still describe the system. The data-model section predates later tables (profiles, briefs, corrections, library, packaging, evaluations and render reviews). Treat `apps/worker/src/clipforge/db/schema.sql` as authoritative for the current schema.
 
 ## 1. Shape of the system
 
