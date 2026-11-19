@@ -15,6 +15,7 @@ access, the user gets a specific explanation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import mimetypes
@@ -49,9 +50,13 @@ from clipforge.storage.workspace import ensure_layout, ensure_space
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 1024 * 1024
-DOWNLOAD_ATTEMPTS = 3
-RETRY_BASE_SECONDS = 1.0
-RETRY_MAX_SECONDS = 8.0
+# An interrupted transfer is a pause, not a failure. The retry loop keeps
+# resuming for this long before giving up, so a household outage of tens of
+# minutes finishes the download instead of restarting it.
+DOWNLOAD_RETRY_BUDGET_SECONDS = 30 * 60
+DOWNLOAD_RETRY_MAX_ATTEMPTS = 40
+RETRY_BASE_SECONDS = 2.0
+RETRY_MAX_SECONDS = 60.0
 SOCKET_TIMEOUT_SECONDS = 30
 # A single long-lived connection to a video CDN is routinely throttled to a few
 # KB/s. Chunked, parallel fragment requests keep a multi-hundred-MB download
@@ -454,6 +459,35 @@ def _clean_target_files(stem: Path) -> None:
             logger.warning("Could not remove a partial download file")
 
 
+def _download_stem(paths: Path, *, url: str, selector: str) -> Path:
+    """A resume key that survives a job boundary.
+
+    The same source at the same rendition always resolves to the same file, so a
+    retry hours later continues the bytes already on disk instead of starting a
+    fresh download beside them.
+    """
+    digest = hashlib.sha256(f"{url}\n{selector}".encode("utf-8")).hexdigest()[:32]
+    return paths / "source" / digest
+
+
+def _partial_bytes(stem: Path) -> int:
+    """Bytes already spent on this download that a resume will not fetch again."""
+    total = 0
+    for path in stem.parent.glob(f"{stem.name}*.part"):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _keeps_partial(exc: BaseException) -> bool:
+    """Whether a failure leaves the partial file usable for the next attempt."""
+    if getattr(exc, "code", None) == "cancelled":
+        return True
+    return bool(getattr(exc, "retryable", False))
+
+
 def _sleep(seconds: float, should_cancel) -> None:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -463,9 +497,10 @@ def _sleep(seconds: float, should_cancel) -> None:
 
 
 def _download(yt_dlp, settings: Settings, url: str, options: dict, *, should_cancel) -> dict:
-    """Download with bounded backoff. Permanent failures are not retried."""
+    """Download, resuming through transient failures. Permanent ones stop at once."""
+    deadline = time.monotonic() + DOWNLOAD_RETRY_BUDGET_SECONDS
     last: Exception | None = None
-    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+    for attempt in range(1, DOWNLOAD_RETRY_MAX_ATTEMPTS + 1):
         if should_cancel is not None and should_cancel():
             raise JobFailed("cancelled", "Cancelled")
         try:
@@ -478,14 +513,19 @@ def _download(yt_dlp, settings: Settings, url: str, options: dict, *, should_can
             if not _is_transient(exc):
                 raise mapped from exc
             last = mapped
-        if attempt < DOWNLOAD_ATTEMPTS:
-            delay = min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), RETRY_MAX_SECONDS)
-            logger.info("Download attempt %s failed; retrying in %.1fs", attempt, delay)
-            _sleep(delay, should_cancel)
-    raise JobFailed(
+        delay = min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), RETRY_MAX_SECONDS)
+        if attempt >= DOWNLOAD_RETRY_MAX_ATTEMPTS or time.monotonic() + delay > deadline:
+            break
+        logger.info("Download attempt %s interrupted; resuming in %.1fs", attempt, delay)
+        _sleep(delay, should_cancel)
+    failure = JobFailed(
         "url_download_failed",
-        "The download failed after three attempts. The connection or the site was unstable; retry later.",
-    ) from last
+        "The download could not finish while the connection was down. "
+        "The part already fetched was kept; retry to continue from there.",
+    )
+    # The caller keeps the partial file so the retry really does resume.
+    failure.retryable = True
+    raise failure from last
 
 
 def _download_summary(
@@ -691,9 +731,6 @@ def download_remote(
     """Fetch one remote source. Returns the stored source and measured metrics."""
     yt_dlp = _yt_dlp_module()
     paths = ensure_layout(settings, project_id)
-    # Remote size is unknown until the formats are read; reserve a sane budget.
-    ensure_space(settings, paths, required_bytes=512 * 1024 * 1024)
-    cleanup_partials(settings, project_id)
 
     def report(stage: str, percent: float | None, message: str, detail: dict) -> None:
         if on_progress is None:
@@ -728,6 +765,7 @@ def download_remote(
     reusable = _existing_reusable_source(repos, storage, project_id, url=validated.resolved, choice=choice)
     if reusable is not None:
         report("verifying", 100, "Reusing the source already stored for this project", {"reused": True})
+        ensure_space(settings, paths, required_bytes=512 * 1024 * 1024)
         summary = _download_summary(choice, plan, size_bytes=int(reusable["size_bytes"]),
                                     elapsed_seconds=0.0, bytes_downloaded=0)
         summary["reused"] = True
@@ -753,7 +791,16 @@ def download_remote(
         )
 
     title = str(info.get("title") or "Imported video")
-    target_stem = paths / "source" / uuid.uuid4().hex
+    target_stem = _download_stem(paths, url=validated.resolved, selector=choice.selector)
+    # Keep this download's own fragments: they are what lets a retry resume.
+    cleanup_partials(settings, project_id, keep=target_stem.name)
+    # Remote size is unknown until the formats are read; reserve a sane budget,
+    # less the bytes an earlier attempt already fetched.
+    ensure_space(
+        settings,
+        paths,
+        required_bytes=max(0, 512 * 1024 * 1024 - _partial_bytes(target_stem)),
+    )
     audio_format_id = choice.audio.format_id if choice.audio else None
     measured: dict[str, Any] = {"download": {}, "bytes_downloaded": 0, "eta_seconds": None}
 
@@ -813,14 +860,18 @@ def download_remote(
     try:
         result = _download(yt_dlp, settings, validated.resolved, download_options_payload,
                            should_cancel=should_cancel)
-    except JobFailed:
-        _clean_target_files(target_stem)
-        cleanup_partials(settings, project_id)
+    except JobFailed as exc:
+        # A connection drop is recoverable: the fragments stay for the retry.
+        if not _keeps_partial(exc):
+            _clean_target_files(target_stem)
+            cleanup_partials(settings, project_id)
         raise
     except Exception as exc:
-        _clean_target_files(target_stem)
-        cleanup_partials(settings, project_id)
-        raise _map_error(exc, context="url_download_failed") from exc
+        mapped = _map_error(exc, context="url_download_failed")
+        if not (_keeps_partial(mapped) or _is_transient(exc)):
+            _clean_target_files(target_stem)
+            cleanup_partials(settings, project_id)
+        raise mapped from exc
 
     filepath = None
     for download in result.get("requested_downloads") or []:
@@ -945,13 +996,20 @@ def _ingest_metrics(
     }
 
 
-def cleanup_partials(settings: Settings, project_id: str) -> None:
+def cleanup_partials(settings: Settings, project_id: str, *, keep: str | None = None) -> None:
+    """Remove abandoned download fragments.
+
+    ``keep`` names the one stem a resume may still use; everything else in the
+    source directory is garbage from a download that is no longer running.
+    """
     try:
         paths = ensure_layout(settings, project_id)
     except Exception:
         return
     for pattern in ("*.part", "*.ytdl", "*.temp"):
         for path in paths.glob(f"source/{pattern}"):
+            if keep and path.name.startswith(keep):
+                continue
             try:
                 os.remove(path)
             except OSError:

@@ -281,6 +281,144 @@ def test_permanent_failure_is_not_retried_and_leaves_no_partial(wired, repos, se
     assert repos.sources.find_optional(project["id"]) is None
 
 
+def _interrupted_module(state: _State, *, error: str, leaves_partial: bool):
+    """A fake extractor that dies mid-transfer, optionally leaving yt-dlp's fragment."""
+
+    class _InterruptedYDL(_FakeYDL):
+        def extract_info(self, url: str, download: bool = False):
+            if not download:
+                return INFO
+            self.state["download_calls"] += 1
+            if leaves_partial:
+                target = Path(str(self.options["outtmpl"]).replace("%(ext)s", "f399.mp4.part"))
+                target.write_bytes(b"x" * 4096)
+            raise RuntimeError(error)
+
+    class _Module:
+        def YoutubeDL(self, options: dict) -> _InterruptedYDL:  # noqa: N802 - mirrors yt_dlp's API
+            return _InterruptedYDL(options, state)
+
+    return _Module()
+
+
+def test_the_resume_key_is_stable_for_a_source_and_rendition(settings, project):
+    # given
+    paths = ensure_layout(settings, project["id"])
+
+    # when
+    first = importer._download_stem(paths, url=URL, selector="136+140")
+    again = importer._download_stem(paths, url=URL, selector="136+140")
+    other_rendition = importer._download_stem(paths, url=URL, selector="134+140")
+
+    # then: the same source resumes the same file, a different rendition does not
+    assert first == again
+    assert first != other_rendition
+    assert first.parent == paths / "source"
+
+
+def test_a_transient_outage_keeps_the_fragment_for_the_retry(
+    monkeypatch, wired, repos, settings, project, storage
+):
+    # given: the connection drops and yt-dlp's fragment is already on disk
+    monkeypatch.setattr(importer, "DOWNLOAD_RETRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        importer,
+        "_yt_dlp_module",
+        lambda: _interrupted_module(wired, error="Connection reset by peer", leaves_partial=True),
+    )
+
+    # when
+    with pytest.raises(JobFailed) as raised:
+        download_remote(repos, settings, storage, project_id=project["id"], validated=_validated())
+
+    # then: the failure is marked retryable and the bytes were not thrown away
+    assert raised.value.code == "url_download_failed"
+    assert raised.value.retryable is True
+    paths = ensure_layout(settings, project["id"])
+    assert len(list(paths.glob("source/*.part"))) == 1
+    assert repos.sources.find_optional(project["id"]) is None
+
+
+def test_a_permanent_failure_discards_the_fragment(
+    monkeypatch, wired, repos, settings, project, storage
+):
+    # given
+    monkeypatch.setattr(
+        importer,
+        "_yt_dlp_module",
+        lambda: _interrupted_module(
+            wired,
+            error="Private video. Sign in if you've been granted access",
+            leaves_partial=True,
+        ),
+    )
+
+    # when / then: a source that can never be fetched is not worth keeping bytes for
+    with pytest.raises(JobFailed) as raised:
+        download_remote(repos, settings, storage, project_id=project["id"], validated=_validated())
+
+    assert raised.value.code == "url_private"
+    paths = ensure_layout(settings, project["id"])
+    assert list(paths.glob("source/*")) == []
+
+
+def test_a_retry_resumes_the_file_an_interrupted_run_started(
+    monkeypatch, wired, repos, settings, project, storage
+):
+    # given: one interrupted run that leaves a fragment behind
+    monkeypatch.setattr(importer, "DOWNLOAD_RETRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        importer,
+        "_yt_dlp_module",
+        lambda: _interrupted_module(wired, error="Connection reset by peer", leaves_partial=True),
+    )
+    with pytest.raises(JobFailed):
+        download_remote(repos, settings, storage, project_id=project["id"], validated=_validated())
+    paths = ensure_layout(settings, project["id"])
+    (fragment,) = paths.glob("source/*.part")
+
+    # when: the user retries and the extractor reports the target it was given
+    targets: list[str] = []
+
+    class _RecordingYDL(_FakeYDL):
+        def extract_info(self, url: str, download: bool = False):
+            if download:
+                targets.append(str(self.options["outtmpl"]))
+            return super().extract_info(url, download=download)
+
+    class _Module:
+        def YoutubeDL(self, options: dict) -> _RecordingYDL:  # noqa: N802 - mirrors yt_dlp's API
+            return _RecordingYDL(options, wired)
+
+    monkeypatch.setattr(importer, "_yt_dlp_module", lambda: _Module())
+
+    record, _ = download_remote(
+        repos, settings, storage, project_id=project["id"], validated=_validated(), quality="720p"
+    )
+
+    # then: it continued the interrupted file instead of starting a new download
+    assert record["kind"] == "url"
+    assert Path(targets[-1].replace("%(ext)s", "f399.mp4.part")) == fragment
+
+
+def test_transient_retries_stop_at_the_attempt_cap(
+    monkeypatch, wired, repos, settings, project, storage
+):
+    # given: the connection never comes back
+    monkeypatch.setattr(importer, "DOWNLOAD_RETRY_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(
+        importer,
+        "_yt_dlp_module",
+        lambda: _interrupted_module(wired, error="Connection reset by peer", leaves_partial=False),
+    )
+
+    # when / then: a fast-failing endpoint cannot spin forever
+    with pytest.raises(JobFailed):
+        download_remote(repos, settings, storage, project_id=project["id"], validated=_validated())
+
+    assert wired["download_calls"] == 3
+
+
 def test_cancellation_stops_before_writing_and_cleans_up(wired, repos, settings, project, storage):
     # given: the extractor runs once, then the job is cancelled
     calls = {"count": 0}
