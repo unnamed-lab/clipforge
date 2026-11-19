@@ -312,6 +312,7 @@ def frame_features(rgb: np.ndarray) -> dict:
         ys, xs = np.nonzero(skin)
         if len(xs):
             skin_x = float(np.median(xs) / max(1, width - 1))
+    facecam = _facecam_features(skin)
 
     return {
         "mean_luma": float(np.mean(luma)),
@@ -333,6 +334,86 @@ def frame_features(rgb: np.ndarray) -> dict:
         "content_y": content_y,
         "content_width": content_w,
         "content_height": content_h,
+        **facecam,
+    }
+
+
+def _facecam_features(skin: np.ndarray) -> dict:
+    """Find a corner webcam plate from clustered skin tones.
+
+    This is intentionally a cheap, explainable heuristic, not face recognition.
+    A face-cam is a dense skin-toned blob concentrated in one corner while the
+    rest of the frame is comparatively free of it. When the test fails the
+    caller gets zeros and the renderer falls back with an explicit warning.
+    """
+
+    empty = {
+        "facecam_present": 0.0,
+        "facecam_x": 0.0,
+        "facecam_y": 0.0,
+        "facecam_width": 0.0,
+        "facecam_height": 0.0,
+        "facecam_confidence": 0.0,
+    }
+    if skin.ndim != 2 or skin.size == 0:
+        return empty
+    height, width = skin.shape
+    if width < 40 or height < 30:
+        return empty
+    total_skin = int(skin.sum())
+    if total_skin < 40 or total_skin / skin.size > 0.30:
+        return empty
+
+    best: dict | None = None
+    for left, top in ((0.0, 0.0), (0.66, 0.0), (0.0, 0.66), (0.66, 0.66)):
+        x0 = int(left * width)
+        y0 = int(top * height)
+        x1 = min(width, x0 + int(width * 0.34))
+        y1 = min(height, y0 + int(height * 0.34))
+        region = skin[y0:y1, x0:x1]
+        if region.size == 0:
+            continue
+        count = int(region.sum())
+        density = float(region.mean())
+        concentration = count / total_skin
+        if count < 30 or density < 0.02 or concentration < 0.35:
+            continue
+        score = density * min(1.0, concentration / 0.45)
+        if best is None or score > best["score"]:
+            best = {"score": score, "density": density, "concentration": concentration,
+                    "region": region, "x0": x0, "y0": y0}
+
+    if best is None:
+        return empty
+
+    region = best["region"]
+    ys, xs = np.nonzero(region)
+    pad_x = max(2, int(round(width * 0.03)))
+    pad_y = max(2, int(round(height * 0.03)))
+    bx0 = best["x0"] + int(xs.min()) - pad_x
+    bx1 = best["x0"] + int(xs.max()) + 1 + pad_x
+    by0 = best["y0"] + int(ys.min()) - pad_y
+    by1 = best["y0"] + int(ys.max()) + 1 + pad_y
+
+    # A tiny detected blob is usually a UI icon, not a webcam. Grow it to a
+    # usable plate while keeping the same centre.
+    box_w = max(int(round(width * 0.18)), bx1 - bx0)
+    box_h = max(int(round(height * 0.18)), by1 - by0)
+    cx = (bx0 + bx1) / 2
+    cy = (by0 + by1) / 2
+    box_w = min(box_w, width)
+    box_h = min(box_h, height)
+    bx0 = max(0, min(width - box_w, int(round(cx - box_w / 2))))
+    by0 = max(0, min(height - box_h, int(round(cy - box_h / 2))))
+
+    confidence = min(0.92, 0.40 + best["density"] * 2.5 + best["concentration"] * 0.30)
+    return {
+        "facecam_present": 1.0,
+        "facecam_x": bx0 / width,
+        "facecam_y": by0 / height,
+        "facecam_width": box_w / width,
+        "facecam_height": box_h / height,
+        "facecam_confidence": confidence,
     }
 
 
@@ -411,7 +492,9 @@ def _aggregate(
     features = {}
     keys = ("edge_density", "border_edge_density", "bright_fraction", "dark_fraction",
             "colorfulness", "std_luma", "letterboxed", "text_at_edges", "skin_fraction",
-            "content_x", "content_y", "content_width", "content_height")
+            "content_x", "content_y", "content_width", "content_height",
+            "facecam_present", "facecam_x", "facecam_y", "facecam_width",
+            "facecam_height", "facecam_confidence")
     for key in keys:
         features[key] = float(np.mean([sample.features.get(key, 0.0) for sample in inside]))
     if content_type == "unknown":

@@ -9,7 +9,7 @@ import numpy as np
 from clipforge.media.visual import classify_features, frame_features
 from clipforge.quality.boundaries import review_ending
 from clipforge.ranking.sentences import Sentence
-from clipforge.rendering.composition import decide_composition, fit_rect
+from clipforge.rendering.composition import decide_composition, expand_composition, fit_rect
 from clipforge.rendering.ffmpeg import build_command
 from clipforge.rendering.spec import (
     CAPTION_PRESETS,
@@ -232,6 +232,163 @@ def test_user_crop_focus_overrides_scene_subject():
     assert decision.crop_y_pct == 40.0
 
 
+# --- gaming layouts ----------------------------------------------------------
+
+
+def _facecam_features(**overrides) -> dict:
+    base = {
+        "facecam_present": 1.0,
+        "facecam_x": 0.68,
+        "facecam_y": 0.66,
+        "facecam_width": 0.26,
+        "facecam_height": 0.28,
+        "facecam_confidence": 0.8,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_frame_features_finds_a_skin_toned_corner_webcam():
+    # given a dark game frame with a face-toned plate in the top-right corner
+    frame = np.full((144, 256, 3), 24, dtype=np.uint8)
+    frame[10:52, 190:246] = (176, 118, 92)
+
+    # when
+    features = frame_features(frame)
+
+    # then
+    assert features["facecam_present"] == 1.0
+    assert features["facecam_x"] > 0.55
+    assert features["facecam_y"] < 0.25
+    assert features["facecam_width"] > 0.10
+    assert features["facecam_confidence"] > 0.4
+
+
+def test_full_frame_skin_does_not_become_a_facecam():
+    # given a close-up speaker that fills the frame with skin
+    frame = np.full((144, 256, 3), (176, 118, 92), dtype=np.uint8)
+
+    # when
+    features = frame_features(frame)
+
+    # then
+    assert features["facecam_present"] == 0.0
+
+
+def test_stack_layout_places_the_detected_facecam_below_the_game():
+    # given a scene with a detected corner webcam
+    scene = Scene(
+        start_ms=0,
+        end_ms=8_000,
+        content_type="unknown",
+        confidence=0.6,
+        subject_x=0.5,
+        features=_facecam_features(),
+    )
+
+    # when
+    decision = decide_composition(scene, _spec(composition="stack"), 1920, 1080)
+
+    # then
+    assert decision.mode == "stack"
+    assert decision.facecam is not None
+    assert decision.facecam.y_pct > 0.5
+    assert decision.background == "solid"
+    assert decision.caption_band.bottom_pct <= 0.60
+
+
+def test_stack_layout_never_invents_a_facecam():
+    # given no detected face-cam
+    scene = Scene(
+        start_ms=0,
+        end_ms=8_000,
+        content_type="unknown",
+        confidence=0.6,
+        subject_x=0.5,
+        features={"facecam_present": 0.0},
+    )
+
+    # when
+    decision = decide_composition(scene, _spec(composition="stack"), 1920, 1080)
+
+    # then
+    assert decision.mode == "crop"
+    assert decision.facecam is None
+    assert any("No face-cam" in warning for warning in decision.warnings)
+
+
+def test_facecam_focus_crops_to_the_detected_plate():
+    # given a detected corner webcam
+    scene = Scene(
+        start_ms=0,
+        end_ms=8_000,
+        content_type="talking_head",
+        confidence=0.8,
+        subject_x=0.2,
+        features=_facecam_features(),
+    )
+
+    # when
+    decision = decide_composition(scene, _spec(composition="facecam_focus"), 1920, 1080)
+
+    # then
+    assert decision.mode == "crop"
+    assert decision.source_rect is not None
+    assert decision.source_rect.x_pct == 0.68
+    assert decision.source_rect.width_pct == 0.26
+
+
+def test_facecam_focus_falls_back_when_no_plate_is_found():
+    # given no detected face-cam
+    scene = Scene(
+        start_ms=0,
+        end_ms=8_000,
+        content_type="talking_head",
+        confidence=0.8,
+        subject_x=0.5,
+        features={"facecam_present": 0.0},
+    )
+
+    # when
+    decision = decide_composition(scene, _spec(composition="facecam_focus"), 1920, 1080)
+
+    # then
+    assert decision.mode == "crop"
+    assert decision.source_rect is None
+    assert any("No face-cam" in warning for warning in decision.warnings)
+
+
+def test_forced_stack_analyses_once_and_applies_one_decision(monkeypatch, tmp_path: Path):
+    # given two segments and a detected face-cam in the analysed window
+    spec = _spec(
+        segments=[{"start_ms": 0, "end_ms": 4_000}, {"start_ms": 5_000, "end_ms": 9_000}],
+        composition="stack",
+    )
+    analysis = SceneAnalysis(
+        scenes=[
+            Scene(0, 9_000, "unknown", 0.5, 0.5, features=_facecam_features()),
+        ],
+        samples=[],
+        cuts=[],
+        warnings=[],
+    )
+    calls = {"count": 0}
+
+    def fake_analyse(*args, **kwargs):
+        calls["count"] += 1
+        return analysis
+
+    monkeypatch.setattr("clipforge.rendering.composition.analyse_source_window", fake_analyse)
+
+    # when
+    plan = expand_composition(spec, tmp_path / "source.mp4", 1920, 1080)
+
+    # then
+    assert calls["count"] == 1
+    assert all(segment.composition.mode == "stack" for segment in plan.segments)
+    assert all(segment.composition.facecam is not None for segment in plan.segments)
+
+
 def test_edl_separates_source_and_output_time():
     # given two source spans in non-contiguous source time
     spec = _spec(segments=[{"start_ms": 0, "end_ms": 4_000}, {"start_ms": 5_000, "end_ms": 9_000}])
@@ -440,6 +597,62 @@ def test_crop_segment_uses_measured_x_and_y_offsets(tmp_path: Path):
     # then
     graph = command.args[command.args.index("-filter_complex") + 1]
     assert "crop=1080:1920:(iw-ow)*0.0000:(ih-oh)*1.0000" in graph
+
+
+def test_stack_chain_splits_the_game_and_the_facecam(tmp_path: Path):
+    # given a stack decision with a detected corner webcam
+    spec = _spec(segments=[{"start_ms": 0, "end_ms": 4_000}], composition="stack")
+    spec.segments[0].composition = CompositionDecision(
+        mode="stack",
+        background="solid",
+        background_color="#0B0D11",
+        facecam=Rect(x_pct=0.68, y_pct=0.66, width_pct=0.26, height_pct=0.28),
+    )
+
+    # when
+    command = build_command(
+        spec,
+        source=tmp_path / "source.mp4",
+        cwd=tmp_path,
+        has_audio=False,
+        source_fps=30.0,
+        captions_name=None,
+        source_width=1920,
+        source_height=1080,
+    )
+
+    # then
+    graph = command.args[command.args.index("-filter_complex") + 1]
+    assert "split=2[gamesrc_v0][camsrc_v0]" in graph
+    assert "crop=iw*0.2600:ih*0.2800:iw*0.6800:ih*0.6600" in graph
+    assert "overlay=0:0:shortest=1[stacked_v0]" in graph
+    assert "overlay=0:1152:shortest=1[composed_v0]" in graph
+    assert "color=c=#0B0D11" in graph
+
+
+def test_facecam_focus_crops_the_source_before_filling(tmp_path: Path):
+    # given a crop that zooms into a detected face-cam plate
+    spec = _spec(segments=[{"start_ms": 0, "end_ms": 4_000}], composition="facecam_focus")
+    spec.segments[0].composition = CompositionDecision(
+        mode="crop",
+        source_rect=Rect(x_pct=0.68, y_pct=0.66, width_pct=0.26, height_pct=0.28),
+    )
+
+    # when
+    command = build_command(
+        spec,
+        source=tmp_path / "source.mp4",
+        cwd=tmp_path,
+        has_audio=False,
+        source_fps=30.0,
+        captions_name=None,
+        source_width=1920,
+        source_height=1080,
+    )
+
+    # then
+    graph = command.args[command.args.index("-filter_complex") + 1]
+    assert "crop=iw*0.2600:ih*0.2800:iw*0.6800:ih*0.6600,scale=1080:1920" in graph
 
 
 # --- ending review -----------------------------------------------------------

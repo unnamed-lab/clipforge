@@ -159,7 +159,7 @@ class VideoSettings(BaseModel):
     # ``framing`` is the legacy global switch. ``composition`` may be "auto"
     # (scene-aware), or a manual mode. When both are present, composition wins.
     framing: Literal["crop", "blur"] = "crop"
-    composition: Literal["auto", "crop", "fit", "pip", "split", "manual"] | None = None
+    composition: Literal["auto", "crop", "fit", "pip", "split", "stack", "facecam_focus", "manual"] | None = None
     crop_x_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     crop_y_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     fps: int | None = Field(default=None, ge=15, le=60)
@@ -241,7 +241,7 @@ class CaptionBand(BaseModel):
 class CompositionDecision(BaseModel):
     """How one source scene is mapped into the output frame."""
 
-    mode: Literal["crop", "fit", "pip", "split", "manual"] = "crop"
+    mode: Literal["crop", "fit", "pip", "split", "stack", "manual"] = "crop"
     background: Literal["blur", "solid", "none"] = "blur"
     background_color: str = "#000000"
     content_type: Literal[
@@ -254,6 +254,9 @@ class CompositionDecision(BaseModel):
     crop_y_pct: float = Field(default=50.0, ge=0.0, le=100.0)
     fit_margin_pct: float = Field(default=0.0, ge=0.0, le=0.20)
     foreground: Rect | None = None
+    # Detected face-cam region in source space (normalised). Stack mode uses it
+    # for its lower panel; face-cam focus uses it as a source crop.
+    facecam: Rect | None = None
     # Conservative crop of empty source margins before a contained layout.
     source_rect: Rect | None = None
     # Picture-in-picture keeps the whole source visible over a blurred fill.

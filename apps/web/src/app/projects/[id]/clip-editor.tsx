@@ -13,7 +13,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import type { Candidate, Capabilities, Render, Source, Transcript } from "@clipforge/shared";
+import type { Candidate, Capabilities, HookDocument, Render, Source, Transcript } from "@clipforge/shared";
 import {
   clamp,
   formatDuration,
@@ -25,11 +25,31 @@ import { Badge, ScoreMeter } from "@/components/ui";
 import { EDITORIAL_STRATEGIES } from "@clipforge/shared";
 import { RenderPanel } from "./render-panel";
 import { PackagingPanel } from "./packaging-panel";
-import { clipEndReached, clipStartReached, playbackStartMs } from "@/lib/preview-boundary";
+import { entryAtOutput, resolvePreviewEdl, sourceToOutput } from "@/lib/edl-playback";
 import { apiJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const NUDGE_MS = 250;
+
+type HookSelection = {
+  text?: string;
+  start_ms?: number;
+  end_ms?: number;
+  approved?: boolean;
+  placement?: "before" | "none";
+  direction?: "opening" | "before" | "after" | "none";
+  source?: "candidate" | "external" | "none";
+};
+
+export type CandidatePatch = {
+  start_ms?: number;
+  end_ms?: number;
+  title?: string;
+  decision?: Candidate["decision"];
+  hook?: HookSelection;
+  clear_hook?: boolean;
+  reset_edits?: boolean;
+};
 
 /** What the worker reports after re-sampling one scene at a readable size. */
 type InspectResult = {
@@ -63,10 +83,7 @@ export function ClipEditor({
   capabilities: Capabilities | null;
   hasWaveform: boolean;
   renders: Render[];
-  onPatch: (
-    candidateId: string,
-    patch: { start_ms?: number; end_ms?: number; title?: string; decision?: Candidate["decision"]; reset_edits?: boolean },
-  ) => Promise<void>;
+  onPatch: (candidateId: string, patch: CandidatePatch) => Promise<void>;
   onBoundary: (candidateId: string, action: { action: "accept" | "reject" | "reset"; end_ms?: number }) => Promise<void>;
   onEditorial: (
     candidateId: string,
@@ -77,7 +94,9 @@ export function ClipEditor({
   renderBusy: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const entryRef = useRef(0);
   const [currentMs, setCurrentMs] = useState(candidate.start_ms);
+  const [outputMs, setOutputMs] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
   const [loop, setLoop] = useState(false);
@@ -89,17 +108,24 @@ export function ClipEditor({
   const [notice, setNotice] = useState<string | null>(null);
   const [approveEditorial, setApproveEditorial] = useState(false);
 
+  const duration = source.duration_ms;
+  const edl = useMemo(
+    () =>
+      resolvePreviewEdl(candidate, {
+        approveEditorial,
+        pendingTrim:
+          start !== candidate.start_ms || end !== candidate.end_ms ? { start_ms: start, end_ms: end } : null,
+        sourceDurationMs: duration,
+      }),
+    [candidate, approveEditorial, start, end, duration],
+  );
+  const firstSourceMs = edl.entries[0]?.source_start_ms ?? start;
+  const activeIndex = entryAtOutput(edl.entries, outputMs)?.index ?? 0;
+
   useEffect(() => {
     setStart(candidate.start_ms);
     setEnd(candidate.end_ms);
     setTitle(candidate.title);
-    setCurrentMs(candidate.start_ms);
-    const video = videoRef.current;
-    if (video) {
-      video.pause();
-      setPlaying(false);
-      video.currentTime = candidate.start_ms / 1000;
-    }
   }, [candidate.id, candidate.start_ms, candidate.end_ms, candidate.title]);
 
   useEffect(() => {
@@ -109,29 +135,67 @@ export function ClipEditor({
     };
   }, [candidate.id]);
 
+  // Any change to the edit or the trim replays from the first entry, so the
+  // preview never keeps playing source that is no longer in the cut.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const ms = video.currentTime * 1000;
-    if (clipStartReached(ms, start) || clipEndReached(ms, end)) {
-      video.pause();
-      setPlaying(false);
-      video.currentTime = start / 1000;
-      setCurrentMs(start);
-    }
-  }, [start, end]);
+    video.pause();
+    setPlaying(false);
+    entryRef.current = 0;
+    setOutputMs(0);
+    setCurrentMs(firstSourceMs);
+    video.currentTime = firstSourceMs / 1000;
+  }, [firstSourceMs, start, end]);
 
   const dirty = start !== candidate.start_ms || end !== candidate.end_ms || title !== candidate.title;
   const durationMs = Math.max(0, end - start);
-  const duration = source.duration_ms;
-  const previewFollowsSourceOrder = Boolean(candidate.editorial?.editorial?.reordered);
 
-  const seek = useCallback((ms: number) => {
+  const seek = useCallback(
+    (ms: number) => {
+      const video = videoRef.current;
+      const next = clamp(ms, 0, duration);
+      if (video) video.currentTime = next / 1000;
+      setCurrentMs(next);
+      const mapped = sourceToOutput(edl.entries, next);
+      if (mapped !== null) {
+        setOutputMs(mapped);
+        entryRef.current = entryAtOutput(edl.entries, mapped)?.index ?? 0;
+      }
+    },
+    [duration, edl],
+  );
+
+  const seekOutput = useCallback(
+    (ms: number) => {
+      const hit = entryAtOutput(edl.entries, ms);
+      if (!hit) return;
+      const video = videoRef.current;
+      if (video) video.currentTime = hit.source_ms / 1000;
+      setCurrentMs(hit.source_ms);
+      setOutputMs(hit.entry.output_start_ms + (hit.source_ms - hit.entry.source_start_ms));
+      entryRef.current = hit.index;
+    },
+    [edl],
+  );
+
+  const togglePlayback = () => {
     const video = videoRef.current;
-    const next = clamp(ms, 0, duration);
-    if (video) video.currentTime = next / 1000;
-    setCurrentMs(next);
-  }, [duration]);
+    if (!video) return;
+    if (!video.paused) {
+      video.pause();
+      return;
+    }
+    const resumeAt = outputMs >= edl.total_output_ms - 1 ? 0 : outputMs;
+    const hit = entryAtOutput(edl.entries, resumeAt);
+    if (hit) {
+      entryRef.current = hit.index;
+      video.currentTime = hit.source_ms / 1000;
+      setCurrentMs(hit.source_ms);
+      setOutputMs(hit.entry.output_start_ms + (hit.source_ms - hit.entry.source_start_ms));
+    }
+    void video.play();
+  };
 
   const onTimeUpdate = () => {
     const video = videoRef.current;
@@ -139,24 +203,47 @@ export function ClipEditor({
     const ms = video.currentTime * 1000;
 
     // A paused player is also the trim scrubber: let it inspect source footage
-    // outside the selection. Only an active playback is bounded by the clip.
-    if (!video.paused && clipEndReached(ms, end)) {
-      if (loop) {
-        video.currentTime = start / 1000;
-        setCurrentMs(start);
-        return;
-      }
+    // outside the selection. Only an active playback follows the EDL.
+    if (video.paused) {
+      setCurrentMs(Math.round(ms / 100) * 100);
+      return;
+    }
+
+    const entry = edl.entries[entryRef.current];
+    if (!entry) {
       video.pause();
-      video.currentTime = end / 1000;
-      setCurrentMs(end);
       setPlaying(false);
       return;
     }
-    if (!video.paused && clipStartReached(ms, start)) {
-      video.currentTime = start / 1000;
-      setCurrentMs(start);
+
+    if (ms >= entry.source_end_ms - 60) {
+      const next = edl.entries[entryRef.current + 1];
+      if (next) {
+        entryRef.current += 1;
+        video.currentTime = next.source_start_ms / 1000;
+        setCurrentMs(next.source_start_ms);
+        setOutputMs(next.output_start_ms);
+        return;
+      }
+      const first = edl.entries[0];
+      if (loop && first) {
+        entryRef.current = 0;
+        video.currentTime = first.source_start_ms / 1000;
+        setCurrentMs(first.source_start_ms);
+        setOutputMs(0);
+        return;
+      }
+      video.pause();
+      setPlaying(false);
+      setOutputMs(edl.total_output_ms);
+      setCurrentMs(entry.source_end_ms);
       return;
     }
+
+    // The browser can land a few milliseconds outside a segment after a seek;
+    // clamp so the output playhead never leaves the segment it belongs to.
+    const within = clamp(ms, entry.source_start_ms, entry.source_end_ms);
+    setOutputMs(entry.output_start_ms + (within - entry.source_start_ms));
     setCurrentMs(Math.round(ms / 100) * 100);
   };
 
@@ -256,51 +343,100 @@ export function ClipEditor({
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onTimeUpdate={onTimeUpdate}
-          onLoadedMetadata={() => seek(start)}
+          onLoadedMetadata={() => seekOutput(0)}
           muted={muted}
           playsInline
           controls={false}
           onEnded={() => setPlaying(false)}
         />
-        {previewFollowsSourceOrder ? (
-          <p className="border-t border-white/8 px-2.5 py-1.5 text-[11px] leading-relaxed text-mist-600">
-            Preview follows source order. The approved editorial timeline is applied only in the export.
-          </p>
-        ) : null}
+        <div className="space-y-1.5 border-t border-white/8 px-2.5 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="label">Preview edit</span>
+              <span className="numeric text-[10.5px] text-mist-500">
+                {edl.entries.length} {edl.entries.length === 1 ? "segment" : "segments"} ·{" "}
+                {formatDuration(edl.total_output_ms)}
+              </span>
+            </div>
+            <Badge tone={edl.basis === "timeline" ? "good" : edl.basis === "manual_trim" ? "neutral" : "warn"}>
+              {edl.basis.replaceAll("_", " ")}
+            </Badge>
+          </div>
+          <div
+            className="flex h-8 w-full overflow-hidden rounded border border-white/8"
+            role="group"
+            aria-label="Preview edit decision list"
+          >
+            {edl.entries.map((entry) => {
+              const width = edl.total_output_ms
+                ? ((entry.output_end_ms - entry.output_start_ms) / edl.total_output_ms) * 100
+                : 100;
+              const active = entry.index === activeIndex;
+              return (
+                <button
+                  key={`${entry.index}-${entry.source_start_ms}-${entry.output_start_ms}`}
+                  type="button"
+                  className={cn(
+                    "relative min-w-0 border-r border-black/50 px-1 text-left text-[10px] font-medium last:border-r-0",
+                    roleClass(entry.role),
+                    active && "ring-2 ring-inset ring-ember-400",
+                  )}
+                  style={{ width: `${width}%` }}
+                  onClick={() => seekOutput(entry.output_start_ms)}
+                  title={`${entry.role}: source ${formatTimecodePrecise(entry.source_start_ms)}–${formatTimecodePrecise(
+                    entry.source_end_ms,
+                  )} → output ${formatTimecodePrecise(entry.output_start_ms)}–${formatTimecodePrecise(
+                    entry.output_end_ms,
+                  )}`}
+                  aria-label={`Play ${entry.role} segment from ${formatTimecodePrecise(entry.source_start_ms)}`}
+                >
+                  <span className="block truncate">{entry.role}</span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[11px] leading-relaxed text-mist-500">{edl.note}</p>
+          {edl.warnings.slice(0, 2).map((warning) => (
+            <p key={warning} className="text-[11px] leading-snug text-signal-warn">
+              · {warning}
+            </p>
+          ))}
+        </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-white/8 bg-ink-900 px-2.5 py-2">
           <button
             type="button"
             className="btn btn-ghost btn-sm h-7 px-2"
-            onClick={() => {
-              const video = videoRef.current;
-              if (!video) return;
-              if (video.paused) {
-                const next = playbackStartMs(video.currentTime * 1000, start, end);
-                if (next !== video.currentTime * 1000) seek(next);
-                void video.play();
-              } else {
-                video.pause();
-              }
-            }}
-            aria-label={playing ? "Pause" : "Play selection"}
+            onClick={togglePlayback}
+            aria-label={playing ? "Pause" : "Play the preview edit"}
           >
             {playing ? <Pause className="size-4" strokeWidth={2} /> : <Play className="size-4" strokeWidth={2} />}
           </button>
-          <button type="button" className="btn btn-ghost btn-sm h-7 px-2" onClick={() => seek(start)} aria-label="Jump to in point">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm h-7 px-2"
+            onClick={() => seekOutput(0)}
+            aria-label="Jump to the first segment"
+          >
             <SkipBack className="size-3.5" strokeWidth={2} />
           </button>
-          <button type="button" className="btn btn-ghost btn-sm h-7 px-2" onClick={() => seek(end - 1000)} aria-label="Jump to out point">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm h-7 px-2"
+            onClick={() => seekOutput(Math.max(0, edl.total_output_ms - 1000))}
+            aria-label="Jump to the last second of the preview edit"
+          >
             <SkipForward className="size-3.5" strokeWidth={2} />
           </button>
-          <span className="numeric text-[11.5px] text-mist-400">
-            {formatTimecodePrecise(currentMs)} / {formatTimecode(end)}
+          <span className="numeric text-[11.5px] text-mist-300">
+            {formatTimecodePrecise(outputMs)} / {formatTimecode(edl.total_output_ms)}
           </span>
+          <span className="numeric text-[10.5px] text-mist-600">source {formatTimecodePrecise(currentMs)}</span>
           <button
             type="button"
             className={cn("btn btn-ghost btn-sm h-7 px-2", loop && "text-ember-400")}
             onClick={() => setLoop((value) => !value)}
             aria-pressed={loop}
-            title="Loop the selected range"
+            title="Loop the preview edit"
           >
             Loop
           </button>
@@ -396,6 +532,13 @@ export function ClipEditor({
         projectId={projectId}
         onUseEnd={(ms) => setEnd(clamp(ms, start + 1000, duration))}
         onBoundary={onBoundary}
+      />
+
+      <HookPicker
+        projectId={projectId}
+        candidate={candidate}
+        onPatch={onPatch}
+        onEditorial={onEditorial}
       />
 
       <EditorialPlan
@@ -749,6 +892,242 @@ function EditorialPlan({
   );
 }
 
+type HookListResponse = {
+  hooks: HookDocument[];
+  selected: HookDocument | null;
+  policy: Record<string, unknown> | null;
+  reason: string | null;
+  note: string;
+};
+
+const DIRECTION_LABEL: Record<string, string> = {
+  opening: "this clip opens with it",
+  before: "earlier line adds context",
+  after: "later line becomes a cold open",
+  none: "source line",
+};
+
+function sameHook(a: HookDocument | null | undefined, b: HookDocument): boolean {
+  return Boolean(a && a.start_ms === b.start_ms && a.end_ms === b.end_ms && a.text === b.text);
+}
+
+function HookPicker({
+  projectId,
+  candidate,
+  onPatch,
+  onEditorial,
+}: {
+  projectId: string;
+  candidate: Candidate;
+  onPatch: (candidateId: string, patch: CandidatePatch) => Promise<void>;
+  onEditorial: (
+    candidateId: string,
+    action: { strategy: string; pacing_profile?: string; apply?: boolean },
+  ) => Promise<void>;
+}) {
+  const [data, setData] = useState<HookListResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await apiJson<HookListResponse>(
+        `/api/projects/${projectId}/candidates/${candidate.id}/hooks`,
+      );
+      setData(response);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not load hook options.");
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId, candidate.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const selected = candidate.hook_detail ?? data?.selected ?? null;
+  const hooks = data?.hooks ?? [];
+  const resolvedStrategy = candidate.editorial?.editorial?.strategy ?? "chronological";
+
+  async function choose(option: HookDocument) {
+    const key = `${option.start_ms}-${option.end_ms}`;
+    setBusy(key);
+    setNotice(null);
+    try {
+      await onPatch(candidate.id, {
+        hook: {
+          text: option.text,
+          start_ms: option.start_ms,
+          end_ms: option.end_ms,
+          source: option.source,
+          placement: option.placement,
+          direction: option.direction,
+          approved: true,
+        },
+      });
+      const nextStrategy = option.direction === "after" ? "cold_open" : resolvedStrategy;
+      await onEditorial(candidate.id, { strategy: nextStrategy, apply: true });
+      setNotice(
+        option.direction === "after"
+          ? "The later line is now the opening. Check the plan badge if the cold open fell back."
+          : "Hook saved and the editorial plan re-evaluated. Your trim is unchanged.",
+      );
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : "Could not save that hook.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove() {
+    setBusy("remove");
+    setNotice(null);
+    try {
+      await onPatch(candidate.id, { clear_hook: true });
+      await onEditorial(candidate.id, { strategy: resolvedStrategy, apply: true });
+      setNotice("Hook removed. The clip opens on its own first line.");
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : "Could not remove the hook.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="surface space-y-2.5 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="label">Hook</p>
+          <p className="mt-1 text-[12px] leading-relaxed text-mist-400">
+            Every option is an exact transcript line. Clipforge never writes a hook it cannot find in the
+            source.
+          </p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {selected ? (
+            <Badge tone="good">selected</Badge>
+          ) : (
+            <Badge tone="neutral">clip opens on itself</Badge>
+          )}
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm h-6 px-2 text-[11px]"
+            onClick={() => void load()}
+            disabled={loading}
+          >
+            {loading ? "Loading" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {selected && selected.text ? (
+        <div className="flex flex-wrap items-start gap-2 rounded-md border border-white/8 bg-black/20 px-2.5 py-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-[12px] leading-snug text-mist-100">“{truncate(selected.text, 190)}”</p>
+            <p className="mt-0.5 text-[11px] text-mist-500">
+              {formatTimecodePrecise(selected.start_ms)}–{formatTimecodePrecise(selected.end_ms)} ·{" "}
+              {DIRECTION_LABEL[selected.direction] ?? selected.direction}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm h-6 px-2 text-[11px]"
+            onClick={() => void remove()}
+            disabled={busy !== null}
+          >
+            {busy === "remove" ? "Removing" : "Remove hook"}
+          </button>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-signal-bad/25 bg-signal-bad/[0.05] px-2.5 py-2">
+          <p className="text-[11.5px] text-signal-bad">{error}</p>
+          <button type="button" className="btn btn-ghost btn-sm h-6 px-2 text-[11px]" onClick={() => void load()}>
+            Try again
+          </button>
+        </div>
+      ) : null}
+
+      {!error && data && hooks.length === 0 ? (
+        <p className="text-[11.5px] leading-relaxed text-mist-500">
+          {data.reason === "no_transcript"
+            ? data.note
+            : data.reason === "disabled"
+              ? "Hook selection is off in this project's brief. Enable it in the brief to rank lines."
+              : data.reason === "auto_select_off"
+                ? "Auto-selection is off. No ranked lines were generated for this candidate."
+                : data.note || "No grounded line scored high enough to open the clip."}
+        </p>
+      ) : null}
+
+      {hooks.length > 0 ? (
+        <div className="space-y-1.5">
+          {hooks.slice(0, 6).map((option) => {
+            const key = `${option.start_ms}-${option.end_ms}`;
+            const isSelected = sameHook(selected, option);
+            return (
+              <div
+                key={key}
+                className={cn(
+                  "flex flex-wrap items-start gap-2 rounded-md border px-2.5 py-2",
+                  isSelected ? "border-signal-good/30 bg-signal-good/[0.04]" : "border-white/8 bg-black/20",
+                )}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge tone={option.direction === "after" ? "ember" : option.direction === "before" ? "neutral" : "good"}>
+                      {DIRECTION_LABEL[option.direction] ?? option.direction}
+                    </Badge>
+                    <span className="numeric text-[10.5px] text-mist-500">{Math.round(option.quality)}/100</span>
+                  </div>
+                  <p className="mt-1 text-[12px] leading-snug text-mist-200">“{truncate(option.text, 190)}”</p>
+                  <p className="mt-0.5 text-[11px] leading-snug text-mist-500">{truncate(option.reason, 170)}</p>
+                  {option.warnings.slice(0, 2).map((warning) => (
+                    <p key={warning} className="text-[10.5px] leading-snug text-signal-warn">
+                      · {warning}
+                    </p>
+                  ))}
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <span className="numeric text-[10.5px] text-mist-600">
+                    {formatTimecodePrecise(option.start_ms)}–{formatTimecodePrecise(option.end_ms)}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-sm h-6 px-2 text-[11px]"
+                    onClick={() => void choose(option)}
+                    disabled={busy !== null || isSelected}
+                  >
+                    {isSelected
+                      ? "Selected"
+                      : busy === key
+                        ? "Saving"
+                        : option.direction === "after"
+                          ? "Use as cold open"
+                          : "Use this line"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {notice ? <p className="text-[11.5px] text-signal-info">{notice}</p> : null}
+      <p className="text-[11px] leading-relaxed text-mist-600">
+        Choosing a later line re-evaluates the plan with the cold-open strategy. Choosing an earlier line keeps
+        the current strategy. Manual trims and export settings are never reset.
+      </p>
+    </section>
+  );
+}
+
 type TimelineEntryView = {
   role?: string;
   key_point?: string;
@@ -768,6 +1147,19 @@ type TimelineView = {
 
 function truncate(value: string, limit: number): string {
   return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+const ROLE_CLASS: Record<string, string> = {
+  hook: "bg-ember-500/30 text-ember-100",
+  payoff: "bg-signal-good/20 text-signal-good",
+  loop: "bg-signal-info/20 text-signal-info",
+  context: "bg-white/10 text-mist-300",
+  development: "bg-white/[0.13] text-mist-200",
+  main: "bg-white/15 text-mist-100",
+};
+
+function roleClass(role: string): string {
+  return ROLE_CLASS[role] ?? "bg-white/10 text-mist-300";
 }
 
 function EndingReview({

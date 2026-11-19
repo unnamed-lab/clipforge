@@ -131,6 +131,7 @@ def _segments_for(
             "end_ms": detail.get("end_ms"),
             "source": detail.get("source"),
             "placement": detail.get("placement"),
+            "direction": detail.get("direction"),
             "approved": detail.get("approved"),
         }
 
@@ -170,10 +171,13 @@ def _segments_for(
         and hook
         and hook.get("approved")
         and hook.get("placement") == "before"
+        # Only a line that sits before the clip can open it without repeating or
+        # jumping forward. A later line is a cold open and belongs to the timeline.
+        and hook.get("direction") == "before"
         and isinstance(hook.get("start_ms"), int)
     ):
         start, end = int(hook["start_ms"]), int(hook["end_ms"])
-        if 0 <= start < end <= source_duration:
+        if 0 <= start < end <= int(candidate["start_ms"]):
             segments.insert(0, {"start_ms": start, "end_ms": end, "role": "hook"})
     return segments, hook, _editorial_summary(plan, applied=False, fallback=fallback or "chronological")
 

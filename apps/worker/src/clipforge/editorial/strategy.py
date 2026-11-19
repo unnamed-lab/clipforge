@@ -28,6 +28,7 @@ from clipforge.ranking.sentences import Sentence, TranscriptModel
 
 REACTION_STARTS = ("oh", "wow", "whoa", "no way", "wait", "look", "here's", "heres", "this is")
 MIN_MOVE_MS = 4_000
+MIN_LOOP_MS = 1_200
 OVERLAP_TOLERANCE_MS = 40
 COVERAGE_TOLERANCE_MS = 120
 
@@ -91,8 +92,8 @@ STRATEGIES: dict[str, StrategyProfile] = {
     "loop": StrategyProfile(
         "loop",
         "Payoff → callback → loop",
-        "Seamless looping needs a rendered seam and matching first/last frames.",
-        implemented=False,
+        "Replays the opening beat at the end so the clip can start again without a hard cut.",
+        reorders=True,
     ),
     "open_loop": StrategyProfile(
         "open_loop",
@@ -206,6 +207,26 @@ def _cold_open_available(plan: RetentionPlan, policy: EditorialPolicy) -> tuple[
     return True, "A grounded later line can open the clip and the setup resolves it."
 
 
+def _loop_span(plan: RetentionPlan) -> tuple[int, int] | None:
+    """The opening beat that a loop replays, or None when it is too short."""
+    if not plan.segments:
+        return None
+    opening = plan.segments[0]
+    if opening.duration_ms < MIN_LOOP_MS:
+        return None
+    return opening.source_start_ms, opening.source_end_ms
+
+
+def _loop_available(plan: RetentionPlan, policy: EditorialPolicy) -> tuple[bool, str]:
+    if policy.loop_ending == "disabled":
+        return False, "Loop endings are disabled for this brief."
+    if policy.loop_ending == "manual" and policy.preferred_strategy != "loop":
+        return False, "Loop endings are manual; choose the loop strategy explicitly."
+    if _loop_span(plan) is None:
+        return False, "The opening beat is shorter than 1.2s, so replaying it would read as a stutter."
+    return True, "The opening beat is long enough to replay once as a deliberate loop."
+
+
 def _build_alternative(
     plan: RetentionPlan,
     strategy: str,
@@ -231,6 +252,7 @@ def _build_alternative(
 
 def _alternatives(plan: RetentionPlan, model: TranscriptModel, policy: EditorialPolicy) -> list[EditorialAlternative]:
     cold_ok, cold_reason = _cold_open_available(plan, policy)
+    loop_ok, loop_reason = _loop_available(plan, policy)
     payoff = _payoff_index(plan)
     hot = _movable_index(plan, ("main", "development", "payoff"))
     first = _first_sentence(plan, model)
@@ -295,8 +317,8 @@ def _alternatives(plan: RetentionPlan, model: TranscriptModel, policy: Editorial
         _build_alternative(
             plan,
             "loop",
-            available=False,
-            reason="A loop needs a verified seam; Clipforge does not render one yet.",
+            available=loop_ok,
+            reason=loop_reason,
         ),
         _build_alternative(
             plan,
@@ -440,6 +462,9 @@ def build_timeline(
     hook_start_ms: int | None = None,
     hook_end_ms: int | None = None,
     hook_text: str = "",
+    hook_direction: str = "none",
+    loop_start_ms: int | None = None,
+    loop_end_ms: int | None = None,
     speech_intervals: list[tuple[int, int]] | None = None,
 ) -> TimelineReport:
     """Map disjoint source spans into output order and check the result.
@@ -457,22 +482,30 @@ def build_timeline(
     cursor = 0
     order = _strategy_order(plan, strategy)
 
-    if strategy == "cold_open" and hook_start_ms is not None and hook_end_ms is not None:
-        if hook_end_ms > hook_start_ms:
-            entries.append(
-                TimelineEntry(
-                    index=0,
-                    role="hook",
-                    source_start_ms=int(hook_start_ms),
-                    source_end_ms=int(hook_end_ms),
-                    output_start_ms=0,
-                    output_end_ms=int(hook_end_ms) - int(hook_start_ms),
-                    transition="continuous",
-                    key_point=hook_text[:220],
-                    reason="A grounded later line opens the clip as a cold open.",
-                )
+    hook_allowed = (
+        hook_start_ms is not None
+        and hook_end_ms is not None
+        and (strategy == "cold_open" or hook_direction == "before")
+    )
+    if hook_allowed and hook_end_ms > hook_start_ms:
+        entries.append(
+            TimelineEntry(
+                index=0,
+                role="hook",
+                source_start_ms=int(hook_start_ms),
+                source_end_ms=int(hook_end_ms),
+                output_start_ms=0,
+                output_end_ms=int(hook_end_ms) - int(hook_start_ms),
+                transition="continuous",
+                key_point=hook_text[:220],
+                reason=(
+                    "A grounded later line opens the clip as a cold open."
+                    if strategy == "cold_open"
+                    else "A grounded earlier line opens the clip as context."
+                ),
             )
-            cursor = entries[-1].output_end_ms
+        )
+        cursor = entries[-1].output_end_ms
 
     first_main = True
     for position, segment_index in enumerate(order):
@@ -498,14 +531,41 @@ def build_timeline(
         cursor = entry.output_end_ms
         first_main = False
 
+    if (
+        strategy == "loop"
+        and loop_start_ms is not None
+        and loop_end_ms is not None
+        and loop_end_ms > loop_start_ms
+    ):
+        entries.append(
+            TimelineEntry(
+                index=len(entries),
+                role="loop",
+                source_start_ms=int(loop_start_ms),
+                source_end_ms=int(loop_end_ms),
+                output_start_ms=cursor,
+                output_end_ms=cursor + int(loop_end_ms) - int(loop_start_ms),
+                transition="cut",
+                key_point="Repeats the opening beat.",
+                reason="Replays the opening beat so the clip can loop without a hard cut.",
+            )
+        )
+        cursor = entries[-1].output_end_ms
+
     overlaps: list[dict] = []
     duplicated = 0
+    looped = 0
     for left_index, left in enumerate(entries):
         for right in entries[left_index + 1 :]:
             intersection = min(left.source_end_ms, right.source_end_ms) - max(
                 left.source_start_ms, right.source_start_ms
             )
             if intersection > OVERLAP_TOLERANCE_MS:
+                if "loop" in {left.role, right.role}:
+                    # A loop replays the opening beat on purpose; it is not the
+                    # accidental duplication this check exists to catch.
+                    looped += intersection
+                    continue
                 duplicated += intersection
                 overlaps.append(
                     {
@@ -516,7 +576,7 @@ def build_timeline(
                     }
                 )
 
-    main_entries = [entry for entry in entries if entry.role != "hook"]
+    main_entries = [entry for entry in entries if entry.role not in {"hook", "loop"}]
     main_start = min((entry.source_start_ms for entry in main_entries), default=0)
     main_end = max((entry.source_end_ms for entry in main_entries), default=0)
     speech = _merge_intervals(speech_intervals) if speech_intervals is not None else None
@@ -576,6 +636,7 @@ def build_timeline(
         covered_ms=covered,
         missing_ms=missing,
         duplicated_ms=duplicated,
+        loop_ms=looped,
         gaps=gaps,
         overlaps=overlaps,
         valid=valid,
@@ -629,6 +690,7 @@ def plan_editorial(
 
     alternatives = _alternatives(plan, model, policy)
     cold_ok, cold_reason = _cold_open_available(plan, policy)
+    loop_ok, loop_reason = _loop_available(plan, policy)
     available = {
         alternative.strategy: alternative.available
         for alternative in alternatives
@@ -724,6 +786,15 @@ def plan_editorial(
     if selected in {"result_first", "in_medias_res"}:
         review_required = True
         concerns.append("This reordered edit needs a person to watch the joins before publishing.")
+    if selected == "loop":
+        review_required = True
+        concerns.append(
+            "The clip deliberately replays its opening beat to close the loop; watch the seam before publishing."
+        )
+        if not loop_ok:
+            selected = "chronological"
+            fallback = fallback or "loop"
+            concerns.append(loop_reason)
     if fallback:
         concerns.append(
             f"{STRATEGIES[fallback].label} was requested but unavailable; "
@@ -738,14 +809,23 @@ def plan_editorial(
         review_required = True
 
     order = _strategy_order(plan, selected)
-    reordered = order != list(range(len(plan.segments))) or selected == "cold_open"
+    reordered = order != list(range(len(plan.segments))) or selected in {"cold_open", "loop"}
     hook = _hook_document(plan)
+    # A cold open moves a later line to the front. An earlier line can also open
+    # the clip as context, which keeps source order and needs no approval.
+    hook_in_timeline = hook is not None and (
+        selected == "cold_open" or hook.direction == "before"
+    )
+    loop = _loop_span(plan) if selected == "loop" else None
     timeline = build_timeline(
         plan,
         strategy=selected,
-        hook_start_ms=hook.start_ms if hook is not None and selected == "cold_open" else None,
-        hook_end_ms=hook.end_ms if hook is not None and selected == "cold_open" else None,
+        hook_start_ms=hook.start_ms if hook_in_timeline else None,
+        hook_end_ms=hook.end_ms if hook_in_timeline else None,
         hook_text=hook.text if hook is not None else "",
+        hook_direction=hook.direction if hook is not None else "none",
+        loop_start_ms=loop[0] if loop else None,
+        loop_end_ms=loop[1] if loop else None,
         speech_intervals=[(sentence.start_ms, sentence.end_ms) for sentence in model.sentences],
     )
     if not timeline.valid:

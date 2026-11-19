@@ -287,9 +287,17 @@ export function AnalysisPanel({
               onChange={(event) => setEditorialStrategy(event.target.value as EditorialStrategyId)}
             >
               {EDITORIAL_STRATEGIES.map((entry) => (
-                <option key={entry.id} value={entry.id}>
+                <option
+                  key={entry.id}
+                  value={entry.id}
+                  disabled={entry.available === false}
+                >
                   {entry.label}
-                  {entry.reorders ? " (reorders; needs review)" : ""}
+                  {entry.available === false
+                    ? " (unavailable)"
+                    : entry.reorders
+                      ? " (reorders; needs review)"
+                      : ""}
                 </option>
               ))}
             </select>

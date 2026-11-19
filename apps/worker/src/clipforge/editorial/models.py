@@ -112,6 +112,9 @@ class TimelineReport(BaseModel):
     covered_ms: int = Field(default=0, ge=0)
     missing_ms: int = Field(default=0, ge=0)
     duplicated_ms: int = Field(default=0, ge=0)
+    # Source time a deliberate loop replays. Kept apart from duplicated_ms so an
+    # intentional repeat cannot be confused with an accidental overlap.
+    loop_ms: int = Field(default=0, ge=0)
     gaps: list[dict] = Field(default_factory=list)
     overlaps: list[dict] = Field(default_factory=list)
     valid: bool = True

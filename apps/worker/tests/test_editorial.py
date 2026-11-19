@@ -308,3 +308,147 @@ def test_editorial_plan_survives_duration_and_pacing_changes_without_reordering_
         )
     assert plan.segments
     assert [segment.role for segment in plan.segments] == ["main", "development", "payoff"]
+
+
+def _hook_before(start: int, end: int, text: str) -> dict:
+    hook = _hook(start, end, text)
+    hook["direction"] = "before"
+    hook["needs_context"] = False
+    return hook
+
+
+def test_loop_strategy_replays_the_opening_as_a_deliberate_repeat():
+    # given a moment whose opening beat is long enough to replay
+    plan = _plan(policy=EditorialPolicy(preferred_strategy="loop"))
+
+    # then the loop is applied instead of being rejected as duplicated speech
+    assert plan.editorial is not None
+    assert plan.strategy == "loop"
+    assert plan.editorial.reordered is True
+    assert plan.editorial.review_required is True
+    assert plan.timeline is not None
+    assert plan.timeline.valid is True
+    assert plan.timeline.duplicated_ms == 0
+    assert plan.timeline.loop_ms > 0
+    loop = plan.timeline.entries[-1]
+    assert loop.role == "loop"
+    assert (loop.source_start_ms, loop.source_end_ms) == (
+        plan.segments[0].source_start_ms,
+        plan.segments[0].source_end_ms,
+    )
+    assert loop.output_start_ms == plan.timeline.total_output_ms - (
+        loop.source_end_ms - loop.source_start_ms
+    )
+
+
+def test_a_later_hook_only_opens_a_cold_open_not_a_chronological_cut():
+    # given a plan and a grounded later line
+    plan = _plan()
+
+    # when it is offered to a chronological cut
+    chronological = build_timeline(
+        plan,
+        strategy="chronological",
+        hook_start_ms=20_000,
+        hook_end_ms=23_000,
+        hook_text="We shipped ten thousand units.",
+        hook_direction="after",
+    )
+    # then it is not played twice in source order
+    assert all(entry.role != "hook" for entry in chronological.entries)
+
+    # when the same line opens a deliberate cold open
+    cold_open = build_timeline(
+        plan,
+        strategy="cold_open",
+        hook_start_ms=20_000,
+        hook_end_ms=23_000,
+        hook_text="We shipped ten thousand units.",
+        hook_direction="after",
+    )
+    # then it becomes the first timeline entry
+    assert cold_open.entries[0].role == "hook"
+    assert cold_open.entries[1].transition == "flashback"
+
+
+def test_an_earlier_hook_opens_a_chronological_cut_as_context():
+    # given a moment that starts after a grounded earlier line
+    lines = [
+        (0, 2_000, "So I started the business in my garage."),
+        (3_000, 7_000, "The first year was mostly failed orders."),
+        (7_000, 11_000, "Then one customer asked for a hundred units."),
+        (11_000, 15_000, "By the end we had shipped ten thousand."),
+    ]
+    model = _model(lines)
+    plan = build_retention_plan(
+        model,
+        start_ms=3_000,
+        end_ms=15_000,
+        excerpt="The first year failed until one customer asked for a hundred units.",
+        pacing={"profile": "balanced"},
+        editorial=EditorialPolicy(),
+        duration_preset="extended",
+    )
+
+    # when it is offered to a chronological cut
+    timeline = build_timeline(
+        plan,
+        strategy="chronological",
+        hook_start_ms=0,
+        hook_end_ms=2_000,
+        hook_text="So I started the business in my garage.",
+        hook_direction="before",
+        speech_intervals=[(sentence.start_ms, sentence.end_ms) for sentence in model.sentences],
+    )
+
+    # then it is inserted once, in front of the moment, and nothing repeats
+    assert timeline.entries[0].role == "hook"
+    assert timeline.entries[1].role != "hook"
+    assert timeline.duplicated_ms == 0
+    assert timeline.valid is True
+
+
+def test_chronological_render_only_opens_with_a_hook_that_precedes_the_clip():
+    # given the generated plan is unavailable and the renderer falls back to source order
+    payload = RenderRequest(title="test", candidate_id="candidate")
+    before = {
+        "start_ms": 4_000,
+        "end_ms": 15_000,
+        "edited": False,
+        "hook_detail": _hook_before(1_000, 3_500, "So I started the business in my garage."),
+        "editorial": {},
+    }
+    after = {
+        "start_ms": 4_000,
+        "end_ms": 15_000,
+        "edited": False,
+        "hook_detail": _hook(20_000, 23_000, "We shipped ten thousand units."),
+        "editorial": {},
+    }
+
+    # when both are offered
+    earlier, _, _ = _segments_for(payload, before, {"duration_ms": 30_000})
+    later, _, _ = _segments_for(payload, after, {"duration_ms": 30_000})
+
+    # then only the line that really sits before the clip is played first
+    assert earlier[0] == {"start_ms": 1_000, "end_ms": 3_500, "role": "hook"}
+    assert earlier[1] == {"start_ms": 4_000, "end_ms": 15_000, "role": "main"}
+    assert all(segment["role"] != "hook" for segment in later)
+
+
+def test_a_hook_that_overlaps_the_clip_is_not_inserted_twice():
+    # given a "before" hook that runs into the clip's own opening
+    payload = RenderRequest(title="test", candidate_id="candidate")
+    candidate = {
+        "start_ms": 4_000,
+        "end_ms": 15_000,
+        "edited": False,
+        "hook_detail": _hook_before(3_000, 6_000, "So I started the business in my garage."),
+        "editorial": {},
+    }
+
+    # when
+    segments, _, _ = _segments_for(payload, candidate, {"duration_ms": 30_000})
+
+    # then the overlap is refused rather than repeating source speech
+    assert segments == [{"start_ms": 4_000, "end_ms": 15_000, "role": "main"}]

@@ -14,8 +14,9 @@ from clipforge.briefs.spec import ClippingBrief
 from clipforge.durations import duration_record
 from clipforge.editorial.narrative import build_retention_plan
 from clipforge.errors import Conflict, NotFound, ValidationFailed
+from clipforge.hooks.select import build_hook_candidates
 from clipforge.media.visual import TEXT_READABLE_HEIGHT, analyse_source_window
-from clipforge.ranking.sentences import build_transcript_model
+from clipforge.ranking.sentences import build_transcript_model, tokenize
 from clipforge.security.limits import MIN_CLIP_MS, validate_span
 from clipforge.storage.base import StorageObjectMissing, ensure_local
 from clipforge.storage.workspace import ensure_layout
@@ -161,6 +162,108 @@ def get_candidate(project_id: str, candidate_id: str, request: Request) -> dict:
     return {"candidate": state.repos.candidates.get(project_id, candidate_id)}
 
 
+@router.get("/projects/{project_id}/candidates/{candidate_id}/hooks")
+def list_candidate_hooks(project_id: str, candidate_id: str, request: Request) -> dict:
+    """Rank the grounded hook options for one candidate from its own transcript.
+
+    Options are rebuilt with the brief that produced the candidate, so the list
+    matches what analysis would have offered. Nothing is invented: every entry is
+    an exact transcript span with its real wording.
+    """
+    state = get_state(request)
+    candidate = state.repos.candidates.get(project_id, candidate_id)
+    transcript = state.repos.transcripts.latest(project_id)
+    if transcript is None:
+        return {
+            "hooks": [],
+            "selected": candidate.get("hook_detail") or None,
+            "policy": None,
+            "reason": "no_transcript",
+            "note": "Analyse this project before choosing a hook.",
+        }
+
+    source = state.repos.sources.find_optional(project_id)
+    if source is None:
+        raise NotFound("This project has no source video")
+    run = state.repos.runs.latest(project_id)
+    brief_data = ((run or {}).get("settings") or {}).get("brief") or {}
+    try:
+        brief = ClippingBrief.model_validate(brief_data) if brief_data else ClippingBrief()
+    except ValueError as exc:
+        raise ValidationFailed("The stored brief is not valid", code="invalid_brief") from exc
+
+    model = build_transcript_model(
+        transcript["segments"], int(source["duration_ms"]), transcript.get("language")
+    )
+    options = build_hook_candidates(
+        model,
+        start_ms=int(candidate["start_ms"]),
+        end_ms=int(candidate["end_ms"]),
+        policy=brief.hook,
+        main_text=candidate.get("excerpt") or "",
+        max_words=max(6, min(16, brief.hook.max_ms // 220)),
+        preference=brief.editorial.hook_preference,
+    )
+    selected = candidate.get("hook_detail") or None
+    reason = None
+    if not brief.hook.enabled:
+        reason = "disabled"
+    elif not brief.hook.auto_select:
+        reason = "auto_select_off"
+    elif not options:
+        reason = "no_candidates"
+    return {
+        "hooks": [option.to_dict() for option in options],
+        "selected": selected,
+        "policy": {
+            "enabled": brief.hook.enabled,
+            "auto_select": brief.hook.auto_select,
+            "min_ms": brief.hook.min_ms,
+            "max_ms": brief.hook.max_ms,
+            "allow_external": brief.hook.allow_external,
+            "strict_chronological": brief.hook.strict_chronological,
+            "preference": brief.editorial.hook_preference,
+            "min_score": brief.hook.min_score,
+        },
+        "reason": reason,
+        "note": (
+            "Choose a transcript line to open the clip. Earlier lines add context; "
+            "later lines become a cold open and move the payoff."
+        ),
+    }
+
+
+def _assert_hook_is_grounded(
+    state, project_id: str, source_duration_ms: int, text: str, start_ms: int, end_ms: int
+) -> None:
+    """Reject hook text that is not a verbatim transcript span.
+
+    The UI only offers transcript windows, but the API is the trust boundary: a
+    hook must never become invented dialogue through a crafted request.
+    """
+    transcript = state.repos.transcripts.latest(project_id)
+    if transcript is None:
+        return
+    model = build_transcript_model(
+        transcript["segments"], source_duration_ms, transcript.get("language")
+    )
+    words = [word for sentence in model.sentences for word in sentence.words]
+    if not words:
+        # Legacy transcripts without word timings cannot be checked; analysis
+        # remains the only producer of hooks for these projects.
+        return
+    window: list[str] = []
+    for word in words:
+        if word.end_ms >= start_ms - 100 and word.start_ms <= end_ms + 100:
+            window.extend(tokenize(word.clean))
+    requested = tokenize(text)
+    if not requested or " " + " ".join(requested) + " " not in " " + " ".join(window) + " ":
+        raise ValidationFailed(
+            "This hook is not a verbatim line from the transcript; choose a real source line.",
+            code="hook_not_grounded",
+        )
+
+
 @router.patch("/projects/{project_id}/candidates/{candidate_id}")
 def patch_candidate(project_id: str, candidate_id: str, payload: CandidatePatch, request: Request) -> dict:
     state = get_state(request)
@@ -210,6 +313,9 @@ def patch_candidate(project_id: str, candidate_id: str, payload: CandidatePatch,
                 "A hook needs its real transcript text; Clipforge does not invent dialogue.",
                 code="hook_text_missing",
             )
+        _assert_hook_is_grounded(
+            state, project_id, int(source["duration_ms"]), text, hook_start, hook_end
+        )
         hook_payload = {
             **merged,
             "text": text[:300],
@@ -290,6 +396,13 @@ def re_evaluate_editorial(
     if source is None:
         raise NotFound("This project has no source video")
     candidate = state.repos.candidates.get(project_id, candidate_id)
+    active = state.repos.jobs.active_for(project_id, "analysis")
+    if active:
+        # The analysis job rewrites candidates and their editorial plans. Mutating
+        # one underneath it would be overwritten when the run finishes.
+        raise Conflict(
+            "Analysis is still running for this project; change the strategy when it finishes.",
+        )
     transcript = state.repos.transcripts.latest(project_id)
     if transcript is None:
         raise ValidationFailed("Analyse this project before changing its editorial strategy", code="no_transcript")

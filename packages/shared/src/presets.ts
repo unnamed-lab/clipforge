@@ -156,15 +156,30 @@ export const EDITORIAL_STYLES = [
 ] as const;
 
 export const EDITORIAL_STRATEGIES = [
-  { id: "automatic", label: "Let Clipforge choose", reorders: false },
-  { id: "cold_open", label: "Cold open → flashback → payoff", reorders: true },
-  { id: "in_medias_res", label: "In medias res", reorders: true },
-  { id: "result_first", label: "Result first", reorders: true },
-  { id: "chronological", label: "Chronological", reorders: false },
-  { id: "question_answer", label: "Question → answer", reorders: false },
-  { id: "story_escalation", label: "Escalation → climax", reorders: false },
-  { id: "reaction_led", label: "Reaction led", reorders: false },
-  { id: "manual", label: "Manual ordering", reorders: false },
+  { id: "automatic", label: "Let Clipforge choose", reorders: false, available: true },
+  { id: "cold_open", label: "Cold open → flashback → payoff", reorders: true, available: true },
+  { id: "in_medias_res", label: "In medias res", reorders: true, available: true },
+  { id: "result_first", label: "Result first", reorders: true, available: true },
+  { id: "chronological", label: "Chronological", reorders: false, available: true },
+  { id: "question_answer", label: "Question → answer", reorders: false, available: true },
+  { id: "story_escalation", label: "Escalation → climax", reorders: false, available: true },
+  { id: "reaction_led", label: "Reaction led", reorders: false, available: true },
+  { id: "loop", label: "Payoff → callback → loop", reorders: true, available: true },
+  {
+    id: "montage",
+    label: "Montage / jump cuts",
+    reorders: false,
+    available: false,
+    hint: "A montage needs shots the source does not contain.",
+  },
+  {
+    id: "open_loop",
+    label: "Open loop explanation",
+    reorders: false,
+    available: false,
+    hint: "This phrasing adds narration the source does not contain.",
+  },
+  { id: "manual", label: "Manual ordering", reorders: false, available: true },
 ] as const;
 export type EditorialStrategyId = (typeof EDITORIAL_STRATEGIES)[number]["id"];
 
@@ -235,10 +250,53 @@ export const COMPOSITION_MODES = [
   { id: "fit", label: "Contain", hint: "Show the whole source over a neutral fill" },
   { id: "pip", label: "Picture in picture", hint: "Full source over a blurred background" },
   { id: "split", label: "Split / stacked", hint: "Unavailable for a single source" },
+  { id: "stack", label: "Stack gameplay + face-cam", hint: "Gameplay on top, detected face-cam below" },
+  { id: "facecam_focus", label: "Face-cam focus", hint: "Zoom to a detected face-cam region" },
   { id: "manual", label: "Manual", hint: "Per-scene overrides in the editor" },
 ] as const;
 
 export type CompositionModeId = (typeof COMPOSITION_MODES)[number]["id"];
+
+/** Named gaming layouts. Each maps to a composition the renderer can honour. */
+export const GAMING_PRESETS = [
+  {
+    id: "gameplay_full",
+    label: "Full-screen gameplay",
+    composition: "crop",
+    description: "Fill the frame with the game. HUD text near the left and right edges may be cropped.",
+    warns: "Check kill feed, map and ammo counters before publishing.",
+  },
+  {
+    id: "gameplay_contained",
+    label: "Whole gameplay frame",
+    composition: "fit",
+    description: "Contain the entire game frame so every HUD element stays visible.",
+    warns: "Letterboxed bars appear when the source aspect differs from the output.",
+  },
+  {
+    id: "gameplay_blur",
+    label: "Gameplay over blur",
+    composition: "pip",
+    description: "The full game frame sits over a blurred copy of itself.",
+    warns: "The subject is smaller; captions have less room.",
+  },
+  {
+    id: "facecam_focus",
+    label: "Face-cam focus",
+    composition: "facecam_focus",
+    description: "Zoom to the corner face-cam detected in the footage.",
+    warns: "Falls back to a full crop with a warning when no face-cam is detected.",
+  },
+  {
+    id: "gameplay_facecam",
+    label: "Gameplay + face-cam stack",
+    composition: "stack",
+    description: "Gameplay on top, the detected face-cam in a panel below.",
+    warns: "Falls back to a full crop with a warning when no face-cam is detected.",
+  },
+] as const;
+
+export type GamingPresetId = (typeof GAMING_PRESETS)[number]["id"];
 
 /** Bundled, redistributable caption faces. Requested proprietary faces map to these. */
 export const CAPTION_FONTS = [

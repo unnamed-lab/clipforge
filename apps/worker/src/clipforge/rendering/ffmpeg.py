@@ -87,12 +87,44 @@ def _composition_chain(
         mode = "fit"
     elif mode == "manual":
         mode = "crop"
+    if mode == "stack" and decision.facecam is None:
+        mode = "crop"
+
+    if mode == "stack":
+        face = decision.facecam
+        assert face is not None  # guarded above
+        game_height = max(2, min(height - 2, _even(height * 0.60)))
+        cam_height = max(2, height - game_height)
+        fx = max(0.0, min(1.0, face.x_pct))
+        fy = max(0.0, min(1.0, face.y_pct))
+        fw = max(0.01, min(1.0 - fx, face.width_pct))
+        fh = max(0.01, min(1.0 - fy, face.height_pct))
+        chain = (
+            f"{input_label}split=2[gamesrc_{uid}][camsrc_{uid}];"
+            f"[gamesrc_{uid}]scale={width}:{game_height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{game_height}:(iw-ow)*0.5:(ih-oh)*0.5,setsar=1[game_{uid}];"
+            f"[camsrc_{uid}]crop=iw*{fw:.4f}:ih*{fh:.4f}:iw*{fx:.4f}:ih*{fy:.4f},"
+            f"scale={width}:{cam_height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{cam_height}:(iw-ow)*0.5:(ih-oh)*0.5,setsar=1[cam_{uid}];"
+            f"color=c={decision.background_color}:s={width}x{height}:r=30[bg_{uid}];"
+            f"[bg_{uid}][game_{uid}]overlay=0:0:shortest=1[stacked_{uid}];"
+            f"[stacked_{uid}][cam_{uid}]overlay=0:{game_height}:shortest=1[composed_{uid}];"
+            f"[composed_{uid}]setsar=1"
+        )
+        return chain + f"[{output_label}]"
 
     if mode == "crop":
         x = max(0.0, min(1.0, decision.crop_x_pct / 100))
         y = max(0.0, min(1.0, decision.crop_y_pct / 100))
+        source_crop = ""
+        if decision.source_rect is not None:
+            source = decision.source_rect
+            source_crop = (
+                f"crop=iw*{source.width_pct:.4f}:ih*{source.height_pct:.4f}:"
+                f"iw*{source.x_pct:.4f}:ih*{source.y_pct:.4f},"
+            )
         chain = (
-            f"{input_label}scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"{input_label}{source_crop}scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height}:(iw-ow)*{x:.4f}:(ih-oh)*{y:.4f},setsar=1"
         )
         return chain + f"[{output_label}]"

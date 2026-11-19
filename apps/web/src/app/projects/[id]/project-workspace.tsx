@@ -24,7 +24,7 @@ import { Alert, Badge } from "@/components/ui";
 import { JobPanel } from "@/components/job-panel";
 import { AnalysisPanel } from "./analysis-panel";
 import { CandidateRail } from "./candidate-rail";
-import { ClipEditor } from "./clip-editor";
+import { ClipEditor, type CandidatePatch } from "./clip-editor";
 import { SourceImporter } from "./source-importer";
 
 const ACTIVE_STATES = new Set(["queued", "running", "waiting"]);
@@ -121,10 +121,7 @@ export function ProjectWorkspace({
     }));
   }
 
-  async function patchCandidate(
-    candidateId: string,
-    patch: { start_ms?: number; end_ms?: number; title?: string; decision?: Candidate["decision"]; reset_edits?: boolean },
-  ) {
+  async function patchCandidate(candidateId: string, patch: CandidatePatch) {
     const response = await apiJson<{ candidate: Candidate }>(
       `/api/projects/${projectId}/candidates/${candidateId}`,
       { method: "PATCH", body: patch },

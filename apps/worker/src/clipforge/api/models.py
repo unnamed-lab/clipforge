@@ -65,6 +65,7 @@ class HookPatch(BaseModel):
     end_ms: int | None = Field(default=None, ge=0)
     approved: bool | None = None
     placement: Literal["before", "none"] | None = None
+    direction: Literal["opening", "before", "after", "none"] | None = None
     source: Literal["candidate", "external", "none"] | None = None
 
 
@@ -89,7 +90,8 @@ class EditorialAction(BaseModel):
 
     strategy: Literal[
         "automatic", "chronological", "cold_open", "in_medias_res", "result_first",
-        "question_answer", "story_escalation", "reaction_led", "manual",
+        "question_answer", "story_escalation", "reaction_led", "montage", "loop",
+        "open_loop", "manual",
     ] = "automatic"
     pacing_profile: Literal["calm", "conversational", "balanced", "energetic", "fast"] | None = None
     apply: bool = True
@@ -153,7 +155,7 @@ class RenderRequest(BaseModel):
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
     resolution: Literal[720, 1080] = 1080
     framing: Literal["crop", "blur"] = "crop"
-    composition: Literal["auto", "crop", "fit", "pip", "split", "manual"] = "auto"
+    composition: Literal["auto", "crop", "fit", "pip", "split", "stack", "facecam_focus", "manual"] = "auto"
     composition_overrides: dict[str, dict] | None = None
     crop_x_pct: float | None = Field(default=None, ge=0, le=100)
     crop_y_pct: float | None = Field(default=None, ge=0, le=100)

@@ -93,6 +93,24 @@ def _caption_band(foreground: Rect | None, mode: str) -> CaptionBand:
     return CaptionBand(top_pct=0.62, bottom_pct=0.90)
 
 
+def _facecam_rect(scene: Scene) -> Rect | None:
+    """Return the detected corner webcam plate, if the heuristic found one."""
+
+    if float(scene.features.get("facecam_present", 0.0)) < 0.5:
+        return None
+    x = float(scene.features.get("facecam_x", 0.0))
+    y = float(scene.features.get("facecam_y", 0.0))
+    width = float(scene.features.get("facecam_width", 0.0))
+    height = float(scene.features.get("facecam_height", 0.0))
+    if width <= 0.0 or height <= 0.0:
+        return None
+    x = max(0.0, min(1.0, x))
+    y = max(0.0, min(1.0, y))
+    width = max(0.05, min(1.0 - x, width))
+    height = max(0.05, min(1.0 - y, height))
+    return Rect(x_pct=x, y_pct=y, width_pct=width, height_pct=height)
+
+
 def decide_composition(
     scene: Scene,
     spec: RenderSpec,
@@ -109,6 +127,9 @@ def decide_composition(
     content = scene.content_type
     confidence = scene.confidence
     reason = ""
+    foreground: Rect | None = None
+    source_rect: Rect | None = None
+    facecam: Rect | None = None
 
     if forced == "crop":
         mode = "crop"
@@ -122,6 +143,32 @@ def decide_composition(
         mode = "pip"
         reason = "Picture-in-picture selected for this export."
         auto = False
+    elif forced == "stack":
+        facecam = _facecam_rect(scene)
+        if facecam is None:
+            mode = "crop"
+            reason = "The stacked layout needs a face-cam; none was detected, so the frame is filled instead."
+            warnings.append(
+                "No face-cam corner was detected, so the gameplay + face-cam stack fell back to a "
+                "full-screen crop. Use a different layout or set a crop focus."
+            )
+        else:
+            mode = "stack"
+            reason = "Gameplay + face-cam stack selected; the detected corner webcam sits below the game."
+        auto = False
+    elif forced == "facecam_focus":
+        facecam = _facecam_rect(scene)
+        mode = "crop"
+        auto = False
+        if facecam is None:
+            reason = "Face-cam focus was requested, but no face-cam corner was detected; the frame is filled."
+            warnings.append(
+                "No face-cam corner was detected, so face-cam focus fell back to a full-screen crop. "
+                "Use a different layout or set a crop focus."
+            )
+        else:
+            source_rect = facecam
+            reason = "Face-cam focus crops to the detected corner webcam."
     elif forced == "split":
         mode = "fit"
         reason = "Split/stacked needs two simultaneous sources; this single source is contained."
@@ -156,8 +203,6 @@ def decide_composition(
     if confidence < 0.55 and mode == "fit":
         warnings.append("Low-confidence layout; review the composition before publishing.")
 
-    foreground: Rect | None = None
-    source_rect: Rect | None = None
     if mode == "fit":
         text_at_edges = float(scene.features.get("text_at_edges", 0.0)) > 0.5
         content_width = float(scene.features.get("content_width", 1.0))
@@ -200,12 +245,15 @@ def decide_composition(
     band = _caption_band(foreground, mode)
     if mode == "pip":
         band = CaptionBand(top_pct=0.76, bottom_pct=0.95)
+    if mode == "stack":
+        # Captions sit over the lower third of the gameplay, not over the face-cam.
+        band = CaptionBand(top_pct=0.40, bottom_pct=0.58)
     background = "blur" if mode == "pip" else "solid"
     background_color = "#0B0D11" if background == "solid" else "#000000"
     crop_x = 50.0
     if mode == "crop" and spec.video.crop_x_pct is not None:
         crop_x = spec.video.crop_x_pct
-    elif mode == "crop" and content == "talking_head":
+    elif mode == "crop" and content == "talking_head" and forced != "facecam_focus":
         crop_x = max(30.0, min(70.0, scene.subject_x * 100.0))
     crop_y = spec.video.crop_y_pct if spec.video.crop_y_pct is not None else 50.0
     crop_x = round(float(crop_x), 2)
@@ -226,6 +274,7 @@ def decide_composition(
         crop_y_pct=crop_y,
         fit_margin_pct=0.0,
         foreground=foreground,
+        facecam=facecam,
         source_rect=source_rect,
         caption_band=band,
         warnings=list(dict.fromkeys(warnings)),
@@ -354,6 +403,52 @@ def expand_composition(
             )
             segment.composition = decide_composition(scene, spec, width, height, forced=forced)
         return CompositionPlan(segments=segments, warnings=warnings)
+
+    if forced in {"stack", "facecam_focus"}:
+        # A face-cam is a property of the source, not of a scene boundary, so
+        # detect it once across the whole edit and reuse the decision. That also
+        # keeps the layout stable and avoids splitting the render into dozens of
+        # identical segments.
+        window_start = max(0, min(segment.start_ms for segment in segments) - 250)
+        window_end = max(segment.end_ms for segment in segments) + 250
+        best: Scene | None = None
+        try:
+            analysis = analyse_source_window(
+                source_path,
+                window_start,
+                window_end,
+                cache_dir=cache_dir,
+                source_duration_ms=source_duration_ms,
+                scene_fps=scene_fps,
+                analysis_height=analysis_height,
+                source_height=source_height,
+            )
+            analyses.append(analysis)
+            warnings.extend(analysis.warnings)
+            if analysis.scenes:
+                best = max(
+                    analysis.scenes,
+                    key=lambda scene: float(scene.features.get("facecam_confidence", 0.0)),
+                )
+        except Exception as exc:  # visual analysis must never block an export
+            logger.warning("Face-cam analysis failed for %s-%s: %s", window_start, window_end, exc)
+            warnings.append("Face-cam analysis failed; the requested layout falls back to a full crop.")
+        if best is None:
+            best = Scene(
+                start_ms=segments[0].start_ms,
+                end_ms=segments[0].end_ms,
+                content_type="unknown",
+                confidence=0.3,
+                subject_x=0.5,
+            )
+        decision = decide_composition(best, spec, width, height, forced=forced)
+        for segment in segments:
+            segment.composition = decision.model_copy(deep=True)
+        return CompositionPlan(
+            segments=segments,
+            warnings=list(dict.fromkeys(warnings + decision.warnings)),
+            analyses=analyses,
+        )
 
     if forced != "auto":
         # Legacy documents keep their global framing chain.

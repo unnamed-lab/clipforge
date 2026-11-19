@@ -299,6 +299,63 @@ export const editorialAlternativeSchema = z
   })
   .passthrough();
 
+export const timelineEntrySchema = z
+  .object({
+    index: z.number().default(0),
+    role: z.string().default("main"),
+    source_start_ms: z.number(),
+    source_end_ms: z.number(),
+    output_start_ms: z.number(),
+    output_end_ms: z.number(),
+    sentence_start: z.number().nullable().optional(),
+    sentence_end: z.number().nullable().optional(),
+    transition: z.string().default("cut"),
+    key_point: z.string().default(""),
+    reason: z.string().default(""),
+  })
+  .passthrough();
+export type TimelineEntry = z.infer<typeof timelineEntrySchema>;
+
+export const timelineReportSchema = z
+  .object({
+    version: z.number().default(1),
+    entries: z.array(timelineEntrySchema).default([]),
+    total_output_ms: z.number().default(0),
+    covered_ms: z.number().default(0),
+    missing_ms: z.number().default(0),
+    duplicated_ms: z.number().default(0),
+    loop_ms: z.number().default(0),
+    gaps: z.array(z.record(z.string(), z.unknown())).default([]),
+    overlaps: z.array(z.record(z.string(), z.unknown())).default([]),
+    valid: z.boolean().default(true),
+    warnings: z.array(z.string()).default([]),
+  })
+  .passthrough();
+export type TimelineReport = z.infer<typeof timelineReportSchema>;
+
+export const hookDocumentSchema = z
+  .object({
+    text: z.string().default(""),
+    start_ms: z.number().default(0),
+    end_ms: z.number().default(0),
+    duration_ms: z.number().default(0),
+    source: z.enum(["candidate", "external", "none"]).default("none"),
+    placement: z.enum(["before", "none"]).default("none"),
+    direction: z.enum(["opening", "before", "after", "none"]).default("none"),
+    approved: z.boolean().default(false),
+    grounded: z.boolean().default(true),
+    quality: z.number().default(0),
+    strategy: z.string().default("story"),
+    reason: z.string().default(""),
+    needs_context: z.boolean().default(false),
+    review_required: z.boolean().default(false),
+    scores: z.record(z.string(), z.number()).default({}),
+    warnings: z.array(z.string()).default([]),
+    estimated: z.boolean().default(true),
+  })
+  .passthrough();
+export type HookDocument = z.infer<typeof hookDocumentSchema>;
+
 export const editorialDecisionSchema = z
   .object({
     version: z.number().optional(),
@@ -314,7 +371,7 @@ export const editorialDecisionSchema = z
     applied: z.boolean().default(false),
     fallback: z.string().default(""),
     pacing_profile: z.string().default("balanced"),
-    timeline: z.record(z.string(), z.unknown()).nullable().optional(),
+    timeline: timelineReportSchema.nullable().optional(),
   })
   .passthrough();
 export type EditorialDecision = z.infer<typeof editorialDecisionSchema>;
@@ -332,7 +389,7 @@ export const candidateEditorialSchema = z
     reordered: z.boolean().optional(),
     segments: z.array(z.record(z.string(), z.unknown())).default([]),
     alternatives: z.array(editorialAlternativeSchema).default([]),
-    timeline: z.record(z.string(), z.unknown()).optional(),
+    timeline: timelineReportSchema.optional(),
     editorial: editorialDecisionSchema.optional(),
   })
   .passthrough();
@@ -727,6 +784,8 @@ export const candidateSchema = z
     edited: z.boolean(),
     boundary: candidateBoundarySchema.optional(),
     duration: candidateDurationSchema.optional(),
+    hook_detail: hookDocumentSchema.optional(),
+    hook_candidates: z.array(hookDocumentSchema).default([]),
     editorial: candidateEditorialSchema.optional(),
     packaging: packagingDocumentSchema.optional(),
     created_at: z.string(),
@@ -947,7 +1006,16 @@ export const capabilitiesSchema = z
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
 
 /** Render request body accepted by POST /api/projects/{id}/renders. */
-export const compositionModeSchema = z.enum(["auto", "crop", "fit", "pip", "split", "manual"]);
+export const compositionModeSchema = z.enum([
+  "auto",
+  "crop",
+  "fit",
+  "pip",
+  "split",
+  "stack",
+  "facecam_focus",
+  "manual",
+]);
 export type CompositionMode = z.infer<typeof compositionModeSchema>;
 
 export const renderRequestSchema = z.object({

@@ -8,6 +8,8 @@ import {
   DEFAULT_CAPTION_ALIGNMENT,
   DEFAULT_CAPTION_POSITION,
   DEFAULT_CAPTION_PRESET,
+  EDITORIAL_STRATEGIES,
+  GAMING_PRESETS,
 } from "../src/presets";
 import { candidateSchema, renderRequestSchema } from "../src/schemas";
 
@@ -19,8 +21,35 @@ describe("composition modes", () => {
       "fit",
       "pip",
       "split",
+      "stack",
+      "facecam_focus",
       "manual",
     ]);
+  });
+
+  it("maps every gaming preset to a renderable composition", () => {
+    const modes = new Set(COMPOSITION_MODES.map((mode) => mode.id));
+    expect(GAMING_PRESETS.map((preset) => preset.id)).toEqual([
+      "gameplay_full",
+      "gameplay_contained",
+      "gameplay_blur",
+      "facecam_focus",
+      "gameplay_facecam",
+    ]);
+    for (const preset of GAMING_PRESETS) {
+      expect(modes.has(preset.composition)).toBe(true);
+    }
+  });
+});
+
+describe("editorial strategies", () => {
+  it("only advertises strategies the worker can honour", () => {
+    expect(EDITORIAL_STRATEGIES.filter((entry) => entry.available === false).map((entry) => entry.id)).toEqual([
+      "montage",
+      "open_loop",
+    ]);
+    const loop = EDITORIAL_STRATEGIES.find((entry) => entry.id === "loop");
+    expect(loop?.reorders).toBe(true);
   });
 });
 

@@ -15,6 +15,7 @@ import {
   DEFAULT_CAPTION_POSITION,
   DEFAULT_CAPTION_POSITION_PCT,
   DEFAULT_CAPTION_PRESET,
+  GAMING_PRESETS,
   formatBytes,
   formatDuration,
   formatTimecode,
@@ -303,6 +304,7 @@ export function RenderPanel({
     () => renders.find((render) => render.status === "completed"),
     [renders],
   );
+  const activeGamingPreset = GAMING_PRESETS.find((preset) => preset.composition === composition);
 
   async function submit() {
     setError(null);
@@ -400,6 +402,35 @@ export function RenderPanel({
                 </button>
               ))}
             </div>
+          </div>
+          <div className="space-y-1.5">
+            <p className="label">Gaming layouts</p>
+            <div className="grid gap-1.5">
+              {GAMING_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => setComposition(preset.composition)}
+                  aria-pressed={activeGamingPreset?.id === preset.id}
+                  className={cn(
+                    "flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors",
+                    activeGamingPreset?.id === preset.id
+                      ? "border-signal-info/50 bg-signal-info/[0.08]"
+                      : "border-white/8 bg-black/20 hover:border-white/16",
+                  )}
+                >
+                  <span className="text-[12.5px] text-mist-200">{preset.label}</span>
+                  <span className="text-right text-[10.5px] text-mist-600">
+                    {COMPOSITION_MODES.find((mode) => mode.id === preset.composition)?.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {activeGamingPreset ? (
+              <p className="text-[10.5px] leading-snug text-mist-500">
+                {activeGamingPreset.description} {activeGamingPreset.warns}
+              </p>
+            ) : null}
           </div>
           <div className="space-y-1.5">
             <label className="flex items-center gap-2 text-[12.5px] text-mist-300">
@@ -825,8 +856,18 @@ function CompositionPreview({
   const ratio = aspect === "9:16" ? "9 / 16" : aspect === "1:1" ? "1 / 1" : "16 / 9";
   const contained = mode === "fit" || mode === "split";
   const pip = mode === "pip";
+  const stack = mode === "stack";
+  const facecam = mode === "facecam_focus";
   const bottomInset = aspect === "9:16" ? "18%" : "10%";
   const customTop = `${Math.max(0, Math.min(88, captionPositionPct - 6))}%`;
+  const stackCaption =
+    captionPosition === "center"
+      ? { top: "28%", height: "12%" }
+      : captionPosition === "top"
+        ? { top: "8%", height: "12%" }
+        : captionPosition === "custom"
+          ? { top: `${Math.max(0, Math.min(46, captionPositionPct - 6))}%`, height: "12%" }
+          : { top: "46%", height: "12%" };
   const horizontal =
     captionAlignment === "left"
       ? { left: "8%", right: "auto" }
@@ -841,7 +882,28 @@ function CompositionPreview({
         aria-label={`Layout preview: ${mode}`}
         role="img"
       >
-        {contained || pip ? (
+        {stack ? (
+          <>
+            <div className="absolute inset-x-0 top-0 h-[60%] border-b border-white/20 bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.18),transparent_65%)]">
+              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-400">
+                gameplay
+              </span>
+            </div>
+            <div className="absolute inset-x-0 bottom-0 h-[40%] bg-[radial-gradient(circle_at_50%_40%,rgba(255,209,102,0.16),transparent_65%)]">
+              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-400">
+                face-cam
+              </span>
+            </div>
+          </>
+        ) : facecam ? (
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(255,255,255,0.16),transparent_65%)]">
+            <div className="absolute left-[28%] right-[28%] top-[24%] bottom-[24%] rounded-sm border border-dashed border-signal-info/60 bg-signal-info/[0.06]">
+              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-400">
+                face-cam
+              </span>
+            </div>
+          </div>
+        ) : contained || pip ? (
           <>
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.14),transparent_60%)] opacity-50 blur-sm" />
             <div
@@ -867,13 +929,15 @@ function CompositionPreview({
         <div
           className="absolute inset-x-0 border-y border-dashed border-ember-500/40 bg-ember-500/[0.06]"
           style={
-            captionPosition === "center"
-              ? { ...horizontal, top: "44%", height: "12%" }
-              : captionPosition === "top"
-                ? { ...horizontal, top: "8%", height: "12%" }
-                : captionPosition === "custom"
-                  ? { ...horizontal, top: customTop, height: "12%" }
-                  : { ...horizontal, bottom: bottomInset, height: "12%" }
+            stack
+              ? { ...horizontal, ...stackCaption }
+              : captionPosition === "center"
+                ? { ...horizontal, top: "44%", height: "12%" }
+                : captionPosition === "top"
+                  ? { ...horizontal, top: "8%", height: "12%" }
+                  : captionPosition === "custom"
+                    ? { ...horizontal, top: customTop, height: "12%" }
+                    : { ...horizontal, bottom: bottomInset, height: "12%" }
           }
         >
           <span className="absolute inset-0 grid place-items-center text-[8px] uppercase tracking-[0.2em] text-ember-300/80">
