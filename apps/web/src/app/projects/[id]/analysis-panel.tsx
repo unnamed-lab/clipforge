@@ -178,7 +178,7 @@ export function AnalysisPanel({
             id="clip-count"
             type="range"
             min={3}
-            max={20}
+            max={capabilities?.limits.max_moments_per_request ?? 30}
             step={1}
             value={clipCount}
             onChange={(event) => setClipCount(Number(event.target.value))}

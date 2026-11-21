@@ -4,6 +4,7 @@ import logging
 import time
 
 from clipforge.db.repositories import Repositories
+from clipforge.discovery.service import run_discovery
 from clipforge.errors import JobFailed
 from clipforge.jobs.queue import JobContext
 from clipforge.media.importer import download_remote, progress_band
@@ -21,6 +22,23 @@ def handle_analysis(ctx: JobContext) -> dict:
     if not project_id:
         raise JobFailed("invalid_job", "This job is missing its project.")
     return run_analysis(
+        ctx.repos,
+        ctx.settings,
+        ctx.storage,
+        project_id=project_id,
+        request=payload,
+        on_stage=ctx.on_stage,
+        should_cancel=ctx.should_cancel,
+        cancel_event=ctx.cancel_event,
+    )
+
+
+def handle_discovery(ctx: JobContext) -> dict:
+    payload = ctx.job.get("payload") or {}
+    project_id = ctx.job.get("project_id") or payload.get("project_id")
+    if not project_id:
+        raise JobFailed("invalid_job", "This job is missing its project.")
+    return run_discovery(
         ctx.repos,
         ctx.settings,
         ctx.storage,
@@ -122,6 +140,7 @@ def handle_url_import(ctx: JobContext) -> dict:
 def build_handlers(repos: Repositories) -> dict:
     return {
         "analysis": handle_analysis,
+        "discovery": handle_discovery,
         "render": handle_render,
         "url_import": handle_url_import,
     }

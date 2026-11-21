@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from clipforge.discovery.criteria import DiscoveryCriteria
 from clipforge.rendering.spec import DEFAULT_CAPTION_PRESET, CaptionSettings
 
 
@@ -46,7 +47,7 @@ class AnalysisRequest(BaseModel):
         "best_moments", "social_clips", "educational", "funny", "debate",
         "emotional_stories", "tutorials", "highlights", "condensed", "custom",
     ] = "best_moments"
-    clip_count: int = Field(default=8, ge=1, le=20)
+    clip_count: int = Field(default=8, ge=1, le=30)
     duration_band: Literal["auto", "short", "medium", "long"] = "auto"
     quality: Literal["fast", "balanced", "best"] = "balanced"
     model: str | None = None
@@ -57,6 +58,14 @@ class AnalysisRequest(BaseModel):
     weights: dict[str, float] | None = None
     instructions: str | None = Field(default=None, max_length=600)
     brief: dict | None = None
+
+
+class DiscoveryRequest(DiscoveryCriteria):
+    """One targeted search for additional moments.
+
+    ``count`` is how many new moments to add, not the new total. Existing
+    candidates are never regenerated or replaced by this request.
+    """
 
 
 class HookPatch(BaseModel):

@@ -7,6 +7,7 @@ import { Badge, ProgressBar, Spinner } from "@/components/ui";
 
 const TYPE_LABEL: Record<string, string> = {
   analysis: "Finding moments",
+  discovery: "Finding more moments",
   render: "Rendering clip",
   url_import: "Downloading source",
 };
@@ -33,6 +34,14 @@ const STAGE_LABEL: Record<string, Record<string, string>> = {
     rank: "Ranking moments",
     boundaries: "Reviewing clip endings",
     done: "Ready to edit",
+  },
+  discovery: {
+    prepare: "Loading the existing analysis",
+    discover: "Finding new moments",
+    rank: "Ranking against the brief",
+    dedupe: "Removing duplicates",
+    boundaries: "Reviewing new endings",
+    done: "Additional moments ready",
   },
   render: {
     assets: "Checking assets",

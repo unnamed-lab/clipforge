@@ -33,6 +33,12 @@ MOMENT_TYPES: dict[str, str] = {
     "strong_insight": "Strong insights",
     "memorable_quote": "Memorable quotes",
     "audience_question": "Audience questions",
+    "surprising": "Surprising moments",
+    "question_answer": "Questions and answers",
+    "tutorial": "Tutorials and how-tos",
+    "strong_hook": "Strong openings",
+    "gameplay_highlight": "Gameplay highlights",
+    "fail": "Fails and close calls",
     "custom": "Custom category",
 }
 
@@ -312,7 +318,7 @@ class ClippingBrief(BaseModel):
     exclude_topics: list[str] = Field(default_factory=list)
     exclude_keywords: list[str] = Field(default_factory=list)
     exclude_speakers: list[str] = Field(default_factory=list)
-    clip_count: int = Field(default=8, ge=1, le=20)
+    clip_count: int = Field(default=8, ge=1, le=30)
     duration_preset: Literal["short", "standard", "extended", "custom"] = "extended"
     min_duration_ms: int = Field(default=60_000, ge=MIN_CUSTOM_DURATION_MS, le=MAX_CUSTOM_DURATION_MS)
     max_duration_ms: int = Field(default=90_000, ge=MIN_CUSTOM_DURATION_MS, le=MAX_CUSTOM_DURATION_MS)
@@ -461,6 +467,6 @@ def brief_from_legacy(
     return ClippingBrief(
         moment_types=moment_types,
         instructions=(instructions or "").strip(),
-        clip_count=max(1, min(20, clip_count)),
+        clip_count=max(1, min(30, clip_count)),
         duration_preset=band_to_preset.get(duration_band, "extended"),
     )

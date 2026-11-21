@@ -25,6 +25,7 @@ import { JobPanel } from "@/components/job-panel";
 import { AnalysisPanel } from "./analysis-panel";
 import { CandidateRail } from "./candidate-rail";
 import { ClipEditor, type CandidatePatch } from "./clip-editor";
+import { DiscoveryCounts, DiscoveryPanel } from "./discovery-panel";
 import { SourceImporter } from "./source-importer";
 
 const ACTIVE_STATES = new Set(["queued", "running", "waiting"]);
@@ -43,11 +44,16 @@ export function ProjectWorkspace({
   const [transcript, setTranscript] = useState(initialTranscript);
   const [selectedId, setSelectedId] = useState<string | null>(initialDetail.candidates[0]?.id ?? null);
   const [showRerun, setShowRerun] = useState(false);
+  const [showDiscovery, setShowDiscovery] = useState(false);
   const [replacingSource, setReplacingSource] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasWaveform, setHasWaveform] = useState(false);
+  const [railCounts, setRailCounts] = useState({ displayed: initialDetail.candidates.length, selected: 0 });
+  const [batchBusy, setBatchBusy] = useState(false);
   const transcriptRef = useRef(initialTranscript);
+  const discoveryRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
 
   const projectId = detail.project.id;
   const activeJob = detail.jobs.find((job) => ACTIVE_STATES.has(job.state));
@@ -55,6 +61,15 @@ export function ProjectWorkspace({
   const selected = useMemo(
     () => detail.candidates.find((candidate) => candidate.id === selectedId) ?? detail.candidates[0] ?? null,
     [detail.candidates, selectedId],
+  );
+  const convertedIds = useMemo(
+    () =>
+      new Set(
+        detail.renders
+          .filter((render) => render.status === "completed" && render.candidate_id)
+          .map((render) => render.candidate_id as string),
+      ),
+    [detail.renders],
   );
 
   const refresh = useCallback(async () => {
@@ -137,6 +152,46 @@ export function ProjectWorkspace({
   async function renderClip(body: Record<string, unknown>) {
     await apiJson(`/api/projects/${projectId}/renders`, { method: "POST", body });
     await refresh();
+  }
+
+  async function createClips(candidates: Candidate[]) {
+    if (candidates.length === 0) return;
+    setBatchBusy(true);
+    setError(null);
+    try {
+      for (const candidate of candidates) {
+        await apiJson(`/api/projects/${projectId}/renders`, {
+          method: "POST",
+          body: {
+            candidate_id: candidate.id,
+            include_hook: true,
+            apply_editorial: true,
+          },
+        });
+      }
+      await refresh();
+    } catch (caught) {
+      setError(messageFrom(caught));
+      await refresh();
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  function previewSelected(candidates: Candidate[]) {
+    const first = candidates[0];
+    if (!first) return;
+    setSelectedId(first.id);
+    window.requestAnimationFrame(() => {
+      editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  function openDiscovery() {
+    setShowDiscovery(true);
+    window.requestAnimationFrame(() => {
+      discoveryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 
   async function reviewBoundary(
@@ -299,6 +354,25 @@ export function ProjectWorkspace({
 
       {source ? <SourceFacts detail={detail} /> : null}
 
+      {source && source.has_audio && detail.candidates.length > 0 ? (
+        <div ref={discoveryRef} className="space-y-2">
+          <DiscoveryCounts
+            state={detail.discovery}
+            displayed={railCounts.displayed}
+            selected={railCounts.selected}
+          />
+          <DiscoveryPanel
+            detail={detail}
+            capabilities={capabilities}
+            expanded={showDiscovery}
+            onToggle={() => setShowDiscovery((value) => !value)}
+            onStarted={async () => {
+              await refresh();
+            }}
+          />
+        </div>
+      ) : null}
+
       {source && !source.has_audio ? (
         <Alert tone="warn" title="This file has no audio track">
           ClipForge ranks spoken moments, so this source cannot be analysed. Import a recording with speech
@@ -328,9 +402,15 @@ export function ProjectWorkspace({
                   setError(messageFrom(caught)),
                 );
               }}
+              onBatchCreate={createClips}
+              onPreviewSelected={previewSelected}
+              onFindMore={openDiscovery}
+              batchBusy={batchBusy}
+              convertedIds={convertedIds}
+              onCountsChange={setRailCounts}
             />
           </div>
-          <div className="min-w-0 space-y-4">
+          <div className="min-w-0 space-y-4" ref={editorRef}>
             {selected && source ? (
               <ClipEditor
                 key={selected.id}
@@ -437,6 +517,7 @@ function SourceFacts({ detail }: { detail: ProjectDetail }) {
   const source = detail.source;
   if (!source) return null;
   const run = detail.analysis;
+  const discovery = detail.discovery;
   return (
     <section className="surface flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 text-[11.5px] text-mist-500">
       <span className="min-w-0 max-w-[280px] truncate" title={source.original_name}>
@@ -446,7 +527,8 @@ function SourceFacts({ detail }: { detail: ProjectDetail }) {
         {source.video_codec ?? "?"} / {source.audio_codec ?? "no audio"} · {source.fps ? `${Math.round(source.fps * 100) / 100} fps` : "—"}
       </span>
       <span>
-        {detail.candidates.length} moments · {detail.renders.filter((render) => render.status === "completed").length} exports
+        {discovery?.counts.total_discovered ?? detail.candidates.length} discovered ·{" "}
+        {discovery?.counts.accepted ?? 0} kept · {discovery?.counts.converted ?? 0} clips made
       </span>
       {run ? (
         <span className="numeric">

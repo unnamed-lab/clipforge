@@ -782,6 +782,9 @@ export const candidateSchema = z
     user_end_ms: z.number().nullable(),
     duplicate_of: z.string().nullable().optional(),
     edited: z.boolean(),
+    moment_type: z.string().default(""),
+    speaker: z.string().nullable().optional(),
+    batch_kind: z.string().optional(),
     boundary: candidateBoundarySchema.optional(),
     duration: candidateDurationSchema.optional(),
     hook_detail: hookDocumentSchema.optional(),
@@ -793,6 +796,99 @@ export const candidateSchema = z
   })
   .passthrough();
 export type Candidate = z.infer<typeof candidateSchema>;
+
+export const discoveryMomentTypeSchema = z
+  .object({
+    id: z.string(),
+    label: z.string(),
+    evidence: z.string(),
+    available: z.boolean(),
+  })
+  .passthrough();
+export type DiscoveryMomentType = z.infer<typeof discoveryMomentTypeSchema>;
+
+export const discoveryCriteriaSchema = z.object({
+  count: z.number().int().min(1),
+  moment_types: z.array(z.string()).default([]),
+  include_topics: z.array(z.string()).default([]),
+  include_keywords: z.array(z.string()).default([]),
+  include_speakers: z.array(z.string()).default([]),
+  source_start_ms: z.number().nullable().optional(),
+  source_end_ms: z.number().nullable().optional(),
+  min_duration_ms: z.number().nullable().optional(),
+  max_duration_ms: z.number().nullable().optional(),
+  custom_request: z.string().default(""),
+  min_quality: z.number().nullable().optional(),
+  diversity: z.enum(["balanced", "chronological", "quality"]).default("balanced"),
+  revisit_underexplored: z.boolean().default(true),
+  exclude_existing: z.boolean().default(true),
+});
+export type DiscoveryCriteria = z.infer<typeof discoveryCriteriaSchema>;
+
+export const discoveryBucketSchema = z
+  .object({
+    index: z.number(),
+    start_ms: z.number(),
+    end_ms: z.number(),
+    candidates: z.number(),
+    new_candidates: z.number().default(0),
+    covered_ms: z.number(),
+    ratio: z.number(),
+    status: z.enum(["unexplored", "thin", "covered"]),
+  })
+  .passthrough();
+export type DiscoveryBucket = z.infer<typeof discoveryBucketSchema>;
+
+export const discoveryCoverageSchema = z
+  .object({
+    duration_ms: z.number().default(0),
+    covered_ms: z.number().default(0),
+    ratio: z.number().default(0),
+    buckets: z.array(discoveryBucketSchema).default([]),
+    unexplored: z.number().default(0),
+    thin: z.number().default(0),
+    covered: z.number().default(0),
+  })
+  .passthrough();
+export type DiscoveryCoverage = z.infer<typeof discoveryCoverageSchema>;
+
+export const discoveryBatchSchema = z
+  .object({
+    id: z.string(),
+    kind: z.enum(["initial", "additional"]).default("initial"),
+    status: z.string(),
+    created_at: z.string(),
+    candidate_count: z.number(),
+    requested: z.number().nullable().optional(),
+    found: z.number().nullable().optional(),
+    reason: z.string().nullable().optional(),
+    exhausted: z.boolean().nullable().optional(),
+    criteria: discoveryCriteriaSchema.partial().default({}),
+    criteria_key: z.string().nullable().optional(),
+    coverage: discoveryCoverageSchema.default({}),
+    warnings: z.array(z.string()).default([]),
+    converted: z.number().default(0),
+  })
+  .passthrough();
+export type DiscoveryBatch = z.infer<typeof discoveryBatchSchema>;
+
+export const discoveryStateSchema = z.object({
+  batches: z.array(discoveryBatchSchema).default([]),
+  counts: z.object({
+    total_discovered: z.number(),
+    accepted: z.number(),
+    converted: z.number(),
+    batches: z.number(),
+  }),
+  coverage: discoveryCoverageSchema.default({}),
+  active_job: jobSchema.nullable().optional(),
+  generating: z.boolean().default(false),
+  last_result: discoveryBatchSchema.nullable().optional(),
+});
+export type DiscoveryState = z.infer<typeof discoveryStateSchema>;
+
+export const discoveryRequestSchema = discoveryCriteriaSchema.partial({ count: true });
+export type DiscoveryRequest = z.infer<typeof discoveryRequestSchema>;
 
 export const reviewSchema = z
   .object({
@@ -881,6 +977,9 @@ export const analysisRunSchema = z
     id: z.string(),
     project_id: z.string(),
     status: z.string(),
+    kind: z.enum(["initial", "additional"]).default("initial"),
+    superseded: z.boolean().default(false),
+    discovery: z.record(z.string(), z.unknown()).default({}),
     settings: z.record(z.string(), z.unknown()).default({}),
     provider: z.string().nullable(),
     warnings: z.array(z.string()).default([]),
@@ -901,6 +1000,7 @@ export const projectDetailSchema = z.object({
       model: z.string(),
       segment_count: z.number(),
       word_count: z.number(),
+      speakers: z.array(z.string()).default([]),
       created_at: z.string(),
     })
     .nullable(),
@@ -908,6 +1008,7 @@ export const projectDetailSchema = z.object({
   candidates: z.array(candidateSchema),
   renders: z.array(renderSchema),
   jobs: z.array(jobSchema),
+  discovery: discoveryStateSchema.optional(),
 });
 export type ProjectDetail = z.infer<typeof projectDetailSchema>;
 
@@ -960,7 +1061,20 @@ export const capabilitiesSchema = z
       requires_consent: z.boolean(),
     }),
     storage: z.object({ free_bytes: z.number(), min_free_bytes: z.number(), data_dir: z.string() }),
-    limits: z.object({ max_upload_bytes: z.number(), max_duration_ms: z.number() }),
+    limits: z.object({
+      max_upload_bytes: z.number(),
+      max_duration_ms: z.number(),
+      max_moments_per_request: z.number().default(30),
+    }),
+    discovery: z
+      .object({
+        moment_types: z.array(discoveryMomentTypeSchema).default([]),
+        max_count: z.number().default(30),
+        reuses_transcript: z.boolean().default(true),
+        supports_source_range: z.boolean().default(true),
+        supports_speakers: z.boolean().default(true),
+      })
+      .optional(),
     download: z
       .object({
         qualities: z.array(
@@ -1066,7 +1180,7 @@ export type RenderRequest = z.infer<typeof renderRequestSchema>;
 
 export const analysisRequestSchema = z.object({
   goal: z.string(),
-  clip_count: z.number().min(3).max(20),
+  clip_count: z.number().min(1).max(30),
   duration_band: z.enum(["auto", "short", "medium", "long"]),
   quality: z.enum(["fast", "balanced", "best"]),
   language: z.string().max(12).nullable().optional(),

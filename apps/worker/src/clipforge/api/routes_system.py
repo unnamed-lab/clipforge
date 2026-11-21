@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 
 from clipforge import __version__
 from clipforge.api.deps import get_state
+from clipforge.discovery.criteria import DISCOVERY_MOMENT_TYPES
 from clipforge.media.policy import (
     DEFAULT_QUALITY,
     MAX_PROXY_HEIGHT,
@@ -115,6 +116,17 @@ def capabilities(request: Request) -> dict:
         "limits": {
             "max_upload_bytes": settings.max_upload_bytes,
             "max_duration_ms": settings.max_duration_ms,
+            "max_moments_per_request": settings.max_moments_per_request,
+        },
+        # Discovery is offered only for the evidence this pipeline produces.
+        # `available: false` entries are shown with their reason instead of
+        # being hidden, so the limit is legible rather than mysterious.
+        "discovery": {
+            "moment_types": list(DISCOVERY_MOMENT_TYPES),
+            "max_count": settings.max_moments_per_request,
+            "reuses_transcript": True,
+            "supports_source_range": True,
+            "supports_speakers": True,
         },
         # What the UI is allowed to offer. Values describe policy, not a promise
         # that a given source publishes that rendition.

@@ -61,6 +61,7 @@ class Settings:
     llm_model: str
     llm_api_key: str
     llm_timeout_seconds: int
+    max_moments_per_request: int = 30
     youtube_api_key: str = ""
     youtube_suggest_enabled: bool = False
     trends_endpoint: str = ""
@@ -150,6 +151,7 @@ def load_settings() -> Settings:
         llm_model=os.environ.get("CLIPFORGE_LLM_MODEL", "").strip(),
         llm_api_key=os.environ.get("CLIPFORGE_LLM_API_KEY", "").strip(),
         llm_timeout_seconds=_env_int("CLIPFORGE_LLM_TIMEOUT_SECONDS", 60),
+        max_moments_per_request=max(1, _env_int("CLIPFORGE_MAX_MOMENTS_PER_REQUEST", 30)),
         youtube_api_key=os.environ.get("CLIPFORGE_YOUTUBE_API_KEY", "").strip(),
         youtube_suggest_enabled=_env_bool("CLIPFORGE_YOUTUBE_SUGGEST_ENABLED", False),
         trends_endpoint=os.environ.get("CLIPFORGE_TRENDS_ENDPOINT", "").strip(),

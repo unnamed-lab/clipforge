@@ -29,6 +29,16 @@ FINANCIAL_CLAIMS = (
 )
 REACTION_STARTS = ("oh", "wow", "whoa", "no way", "yes", "what", "wait", "look")
 ADVICE_MARKERS = ("you should", "you need to", "never ", "always ", "the best way", "my advice", "here's how")
+SURPRISE_MARKERS = (
+    "turns out", "it turns out", "surprisingly", "plot twist", "i couldn't believe",
+    "you won't believe", "no way", "unexpected", "out of nowhere", "the weird part",
+)
+HOOK_MARKERS = (
+    "nobody tells you", "here's why", "here's how", "the reason", "most people",
+    "everyone thinks", "what nobody", "the truth about", "i used to think",
+)
+FAIL_MARKERS = ("almost", "close call", "nearly", "failed", "failure", "messed up", "mistake")
+GAMEPLAY_MARKERS = ("boss", "level", "respawn", "speedrun", "combo", "loot", "quest")
 INSTRUCTION_STOPWORDS = STOPWORDS | {
     "find", "clips", "clip", "want", "wants", "please", "make", "only", "avoid", "prioritise",
     "prioritize", "judge", "quality", "moments", "moment", "should", "must", "good", "great",
@@ -69,6 +79,8 @@ def moment_type_matches(moment_type: str, text: str, category: str, components: 
         return any(marker in lowered for marker in ADVICE_MARKERS) or components.get("quotability", 0) >= 0.65
     if moment_type == "practical_tip":
         return category == "tutorial" or any(marker in lowered for marker in TUTORIAL_MARKERS)
+    if moment_type == "tutorial":
+        return category == "tutorial" or any(marker in lowered for marker in TUTORIAL_MARKERS)
     if moment_type == "controversial":
         return category == "debate" or any(marker in lowered for marker in DEBATE_MARKERS)
     if moment_type == "emotional":
@@ -81,6 +93,21 @@ def moment_type_matches(moment_type: str, text: str, category: str, components: 
         return components.get("quotability", 0) >= 0.55
     if moment_type == "audience_question":
         return "?" in text or any(word in lowered.split()[:3] for word in QUESTION_WORDS)
+    if moment_type == "surprising":
+        return any(marker in lowered for marker in SURPRISE_MARKERS) or components.get("novelty", 0) >= 0.65
+    if moment_type == "question_answer":
+        # A question alone is a prompt, not an answer. Require enough speech for
+        # the response and a question mark or question word in the opening.
+        tokens = tokenize(text)
+        asks = "?" in text or any(word in lowered.split()[:4] for word in QUESTION_WORDS)
+        return asks and len(tokens) >= 18
+    if moment_type == "strong_hook":
+        opening = " ".join(lowered.split()[:18])
+        return any(marker in opening for marker in HOOK_MARKERS) or opening.rstrip().endswith("?")
+    if moment_type in {"gameplay_highlight", "fail"}:
+        # These require frame-level game state or an incident label. Transcript
+        # words such as "boss" or "failed" are not enough evidence to claim one.
+        return False
     if moment_type == "custom":
         return False
     return False

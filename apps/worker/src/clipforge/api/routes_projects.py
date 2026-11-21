@@ -6,6 +6,7 @@ from clipforge.api.deps import get_state
 from clipforge.api.models import ProjectCreate, ProjectPatch
 from clipforge.briefs.spec import ClippingBrief
 from clipforge.db.repositories import serialise_source
+from clipforge.discovery.state import build_discovery_state
 from clipforge.errors import Conflict, NotFound, ValidationFailed
 from clipforge.storage.cleanup import delete_project_media
 from clipforge.storage.workspace import remove_project_workspace
@@ -55,6 +56,13 @@ def get_project(project_id: str, request: Request) -> dict:
             "model": transcript["model"],
             "segment_count": len(transcript["segments"]),
             "word_count": sum(len(segment.get("words") or []) for segment in transcript["segments"]),
+            "speakers": sorted(
+                {
+                    str(segment.get("speaker"))
+                    for segment in transcript["segments"]
+                    if segment.get("speaker")
+                }
+            ),
             "created_at": transcript["created_at"],
         }
 
@@ -66,6 +74,7 @@ def get_project(project_id: str, request: Request) -> dict:
         "candidates": state.repos.candidates.list_for_project(project_id),
         "renders": state.repos.renders.list_for_project(project_id),
         "jobs": state.repos.jobs.list_for_project(project_id, limit=10),
+        "discovery": build_discovery_state(state.repos, project_id, source),
     }
 
 
@@ -81,7 +90,11 @@ def delete_project(project_id: str, request: Request) -> dict:
     state = get_state(request)
     if not state.repos.projects.exists(project_id):
         raise NotFound("Project not found")
-    active = state.repos.jobs.active_for(project_id, "analysis") or state.repos.jobs.active_for(project_id, "render")
+    active = (
+        state.repos.jobs.active_for(project_id, "analysis")
+        or state.repos.jobs.active_for(project_id, "discovery")
+        or state.repos.jobs.active_for(project_id, "render")
+    )
     if active:
         raise Conflict("Stop the running job before deleting this project.")
     delete_project_media(state.storage, state.repos, project_id)

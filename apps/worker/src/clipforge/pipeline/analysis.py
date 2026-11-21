@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Callable
 
 from clipforge.config import Settings
-from clipforge.db.repositories import Repositories, new_id
+from clipforge.db.repositories import Repositories
+from clipforge.discovery.coverage import build_coverage, coverage_summary
 from clipforge.errors import JobFailed
 from clipforge.media.assets import audio_input, visual_input
 from clipforge.media.audio import extract_audio
@@ -23,13 +24,12 @@ from clipforge.pipeline.briefing import (
     attach_hooks,
     persist_brief,
     resolve_brief,
-    summarise,
 )
+from clipforge.pipeline.records import candidate_record
 from clipforge.providers.llm.openai_compat import build_llm_provider
 from clipforge.providers.llm.base import ScorableClip
 from clipforge.providers.transcription.base import TranscriptionOptions
 from clipforge.providers.transcription.faster_whisper import SUPPORTED_MODELS, FasterWhisperTranscription
-from clipforge.quality.boundaries import review_ending
 from clipforge.ranking.dedupe import select_candidates
 from clipforge.ranking.generate import DURATION_BANDS, generate_candidates
 from clipforge.ranking.score import score_candidates, weights_for
@@ -318,10 +318,33 @@ def run_analysis(
             "Relax the brief or check the transcript.",
         )
 
-    run_id = new_id()
-    run = repos.runs.create(project_id, {"goal": goal, "clip_count": clip_count, "quality": request.get("quality"),
-                                         "duration_band": band_choice, "model": options.model,
-                                         "brief": brief.model_dump(), "brief_source": brief_source})
+    discovery = {
+        "kind": "initial",
+        "criteria": {
+            "count": clip_count,
+            "moment_types": list(brief.moment_types),
+            "source_start_ms": 0,
+            "source_end_ms": duration_ms,
+            "duration_min_ms": duration_range.min_ms,
+            "duration_max_ms": duration_range.max_ms,
+        },
+        "requested": clip_count,
+        "found": 0,
+    }
+    run = repos.runs.create(
+        project_id,
+        {
+            "goal": goal,
+            "clip_count": clip_count,
+            "quality": request.get("quality"),
+            "duration_band": band_choice,
+            "model": options.model,
+            "brief": brief.model_dump(),
+            "brief_source": brief_source,
+        },
+        kind="initial",
+        discovery=discovery,
+    )
     run_id = run["id"]
 
     llm_provider = build_llm_provider(settings) if request.get("use_llm") else None
@@ -416,53 +439,19 @@ def run_analysis(
         )
 
     on_stage("boundaries", 94, "Reviewing clip endings")
-    now_payload = []
-    for candidate in selection.kept:
-        hook_detail = candidate.hook_detail or {}
-        try:
-            boundary = review_ending(
-                candidate_start_ms=candidate.start_ms,
-                candidate_end_ms=candidate.end_ms,
-                sentences=model.sentences,
-                source_path=visual_path if source.get("has_video") else None,
-                source_duration_ms=int(source["duration_ms"]),
-                cache_dir=paths / "analysis" / "scenes",
-                scene_fps=scene_fps,
-                analysis_height=analysis_height,
-                source_height=source.get("height"),
-            )
-        except Exception as exc:  # ending review must never break analysis
-            logger.warning("Ending review failed for %s: %s", candidate.draft.key, exc)
-            boundary = {
-                "version": 1,
-                "suspicious": False,
-                "reviewed": "pending",
-                "evidence": ["Ending review could not run."],
-                "alternatives": [],
-            }
-        now_payload.append(
-            {
-                "id": new_id(),
-                "start_ms": candidate.start_ms,
-                "end_ms": candidate.end_ms,
-                "title": candidate.title,
-                "hook": candidate.hook,
-                "hook_detail": hook_detail,
-                "summary": candidate.summary or summarise(candidate.excerpt),
-                "reason": candidate.reason,
-                "category": candidate.category,
-                "excerpt": candidate.excerpt,
-                "scores": candidate.scores_payload(),
-                "brief": candidate.brief,
-                "overall": candidate.overall,
-                "warnings": candidate.warnings,
-                "method": candidate.method,
-                "method_version": candidate.method_version,
-                "boundary": boundary,
-                "editorial": candidate.editorial,
-                "duration": candidate.duration,
-            }
+    now_payload = [
+        candidate_record(
+            candidate,
+            model=model,
+            source=source,
+            visual_path=visual_path if source.get("has_video") else None,
+            scene_dir=paths / "analysis" / "scenes",
+            scene_fps=scene_fps,
+            analysis_height=analysis_height,
+            segments=segments,
         )
+        for candidate in selection.kept
+    ]
 
     suspicious = [candidate for candidate in now_payload if (candidate.get("boundary") or {}).get("suspicious")]
     if suspicious:
@@ -482,14 +471,21 @@ def run_analysis(
         if note not in warnings:
             warnings.append(note)
 
+    coverage = coverage_summary(build_coverage(duration_ms, now_payload))
+    discovery.update({"found": len(now_payload), "coverage": coverage, "warnings": warnings[-8:]})
+
     repos.candidates.replace_for_run(project_id, run_id, now_payload)
+    # A completed full analysis becomes the current view. Earlier runs stay in the
+    # database so old exports remain traceable, but their candidates are hidden.
+    repos.runs.supersede_previous(project_id, run_id)
+    repos.runs.set_discovery(run_id, discovery)
     repos.runs.finish(run_id, status="completed", provider="baseline" if llm_provider is None else "baseline+llm",
                       warnings=warnings)
     repos.projects.update(project_id, status="analysed")
     write_json_atomic(
         paths / "analysis" / "candidates.json",
         {"run_id": run_id, "goal": goal, "brief": brief.model_dump(), "brief_source": brief_source,
-         "weights": weights_for(goal), "candidates": now_payload,
+         "weights": weights_for(goal), "candidates": now_payload, "coverage": coverage,
          "suppressed": len(selection.suppressed), "excluded_by_brief": blocked, "warnings": warnings},
     )
 
@@ -504,6 +500,7 @@ def run_analysis(
         "language_probability": language_probability,
         "model": options.model,
         "transcript_cached": transcript is not None,
+        "coverage": coverage,
         "warnings": warnings,
     }
 

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from clipforge import __version__
 from clipforge.api import (
     routes_analysis,
+    routes_discovery,
     routes_library,
     routes_packaging,
     routes_profiles,
@@ -129,6 +130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(routes_project_settings.router)
     app.include_router(routes_sources.router)
     app.include_router(routes_analysis.router)
+    app.include_router(routes_discovery.router)
     app.include_router(routes_renders.router)
     app.include_router(routes_library.router)
     app.include_router(routes_packaging.router)

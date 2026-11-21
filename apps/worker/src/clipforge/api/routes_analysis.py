@@ -185,7 +185,7 @@ def list_candidate_hooks(project_id: str, candidate_id: str, request: Request) -
     source = state.repos.sources.find_optional(project_id)
     if source is None:
         raise NotFound("This project has no source video")
-    run = state.repos.runs.latest(project_id)
+    run = state.repos.runs.get(candidate["analysis_run_id"])
     brief_data = ((run or {}).get("settings") or {}).get("brief") or {}
     try:
         brief = ClippingBrief.model_validate(brief_data) if brief_data else ClippingBrief()
@@ -406,7 +406,7 @@ def re_evaluate_editorial(
     transcript = state.repos.transcripts.latest(project_id)
     if transcript is None:
         raise ValidationFailed("Analyse this project before changing its editorial strategy", code="no_transcript")
-    run = state.repos.runs.latest(project_id)
+    run = state.repos.runs.latest_initial(project_id)
     brief_data = ((run or {}).get("settings") or {}).get("brief") or {}
     try:
         brief = ClippingBrief.model_validate(brief_data) if brief_data else ClippingBrief()

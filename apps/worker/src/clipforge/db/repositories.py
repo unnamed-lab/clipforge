@@ -343,12 +343,28 @@ class AnalysisRunRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def create(self, project_id: str, settings: dict) -> dict:
+    def create(
+        self,
+        project_id: str,
+        settings: dict,
+        *,
+        kind: str = "initial",
+        discovery: dict | None = None,
+    ) -> dict:
         run_id = new_id()
         with self.db.session() as conn:
             conn.execute(
-                "INSERT INTO analysis_runs(id, project_id, status, settings_json, created_at) VALUES(?,?,?,?,?)",
-                (run_id, project_id, "running", json.dumps(settings), utc_now()),
+                "INSERT INTO analysis_runs(id, project_id, status, settings_json, kind, discovery_json,"
+                " created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    project_id,
+                    "running",
+                    json.dumps(settings),
+                    kind,
+                    json.dumps(discovery or {}),
+                    utc_now(),
+                ),
             )
         return self.get(run_id)
 
@@ -357,9 +373,14 @@ class AnalysisRunRepository:
             row = conn.execute("SELECT * FROM analysis_runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
             raise NotFound("Analysis run not found")
-        data = dict(row)
+        return self._decode(dict(row))
+
+    @staticmethod
+    def _decode(data: dict) -> dict:
         data["settings"] = _loads(data.pop("settings_json"), {})
         data["warnings"] = _loads(data.pop("warnings_json"), [])
+        data["discovery"] = _loads(data.pop("discovery_json", None), {}) or {}
+        data["superseded"] = bool(data.get("superseded"))
         return data
 
     def finish(self, run_id: str, *, status: str, provider: str | None, warnings: list[str]) -> None:
@@ -369,17 +390,60 @@ class AnalysisRunRepository:
                 (status, provider, json.dumps(warnings), utc_now(), run_id),
             )
 
-    def latest(self, project_id: str) -> dict | None:
+    def set_discovery(self, run_id: str, discovery: dict) -> None:
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE analysis_runs SET discovery_json = ? WHERE id = ?",
+                (json.dumps(discovery), run_id),
+            )
+
+    def latest(
+        self,
+        project_id: str,
+        *,
+        kind: str | None = None,
+        include_superseded: bool = False,
+    ) -> dict | None:
+        clauses = ["project_id = ?"]
+        values: list[Any] = [project_id]
+        if kind is not None:
+            clauses.append("kind = ?")
+            values.append(kind)
+        if not include_superseded:
+            clauses.append("superseded = 0")
         with self.db.session() as conn:
             row = conn.execute(
-                "SELECT * FROM analysis_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", (project_id,)
+                f"SELECT * FROM analysis_runs WHERE {' AND '.join(clauses)}"
+                " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                values,
             ).fetchone()
-        if row is None:
-            return None
-        data = dict(row)
-        data["settings"] = _loads(data.pop("settings_json"), {})
-        data["warnings"] = _loads(data.pop("warnings_json"), [])
-        return data
+        return self._decode(dict(row)) if row else None
+
+    def latest_initial(self, project_id: str) -> dict | None:
+        return self.latest(project_id, kind="initial")
+
+    def list_for_project(self, project_id: str, *, include_superseded: bool = False) -> list[dict]:
+        query = "SELECT * FROM analysis_runs WHERE project_id = ?"
+        if not include_superseded:
+            query += " AND superseded = 0"
+        query += " ORDER BY created_at ASC, rowid ASC"
+        with self.db.session() as conn:
+            rows = conn.execute(query, (project_id,)).fetchall()
+        return [self._decode(dict(row)) for row in rows]
+
+    def supersede_previous(self, project_id: str, keep_run_id: str) -> None:
+        """Hide earlier runs after a successful full analysis.
+
+        The rows stay in the database: a superseded run still explains what the
+        user saw at the time, and deleting it would make old exports untraceable.
+        Only the candidate list and the "current" brief stop including it.
+        """
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE analysis_runs SET superseded = 1"
+                " WHERE project_id = ? AND id != ? AND superseded = 0",
+                (project_id, keep_run_id),
+            )
 
 
 # ----------------------------------------------------------------------- candidates
@@ -411,6 +475,8 @@ def serialise_candidate(row: dict) -> dict:
     data["duration"] = _loads(data.pop("duration_json", None), {}) or {}
     data["packaging"] = serialise_packaging(_loads(data.pop("packaging_json", None), {}))
     data["summary"] = data.get("summary") or ""
+    data["moment_type"] = data.get("moment_type") or ""
+    data["speaker"] = data.get("speaker") or None
     data["start_ms"] = data.get("user_start_ms") if data.get("user_start_ms") is not None else data["start_ms"]
     data["end_ms"] = data.get("user_end_ms") if data.get("user_end_ms") is not None else data["end_ms"]
     data["duration_ms"] = int(data["end_ms"]) - int(data["start_ms"])
@@ -440,6 +506,7 @@ class CandidateRepository:
                     json.dumps(candidate.get("hook_detail") or {}), json.dumps(candidate.get("brief") or {}),
                     candidate.get("summary", "")[:600], json.dumps(candidate.get("boundary") or {}),
                     json.dumps(candidate.get("editorial") or {}), json.dumps(candidate.get("duration") or {}),
+                    str(candidate.get("moment_type") or "")[:40], candidate.get("speaker"),
                 )
             )
         with self.db.session() as conn:
@@ -449,8 +516,8 @@ class CandidateRepository:
                 INSERT INTO candidates(id, project_id, analysis_run_id, rank, start_ms, end_ms, title, hook,
                     reason, category, excerpt, scores_json, overall, warnings_json, method, method_version,
                     duplicate_of, created_at, updated_at, hook_json, brief_json, summary, boundary_json,
-                    editorial_json, duration_json)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    editorial_json, duration_json, moment_type, speaker)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 rows,
             )
@@ -458,19 +525,39 @@ class CandidateRepository:
 
     def list_for_project(self, project_id: str, run_id: str | None = None) -> list[dict]:
         with self.db.session() as conn:
-            if run_id is None:
-                row = conn.execute(
-                    "SELECT id FROM analysis_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+            if run_id is not None:
+                rows = conn.execute(
+                    "SELECT c.*, r.kind AS batch_kind FROM candidates c"
+                    " JOIN analysis_runs r ON r.id = c.analysis_run_id"
+                    " WHERE c.project_id = ? AND c.analysis_run_id = ? ORDER BY c.rank ASC",
+                    (project_id, run_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT c.*, r.kind AS batch_kind FROM candidates c"
+                    " JOIN analysis_runs r ON r.id = c.analysis_run_id"
+                    " WHERE c.project_id = ? AND r.superseded = 0"
+                    " ORDER BY r.created_at ASC, c.rank ASC",
                     (project_id,),
-                ).fetchone()
-                if row is None:
-                    return []
-                run_id = row["id"]
-            rows = conn.execute(
-                "SELECT * FROM candidates WHERE project_id = ? AND analysis_run_id = ? ORDER BY rank ASC",
-                (project_id, run_id),
-            ).fetchall()
-        return [serialise_candidate(dict(r)) for r in rows]
+                ).fetchall()
+        result: list[dict] = []
+        for position, row in enumerate(rows, start=1):
+            candidate = serialise_candidate(dict(row))
+            # Display rank is global across the batches the user can currently
+            # see. The stored rank still describes the order inside its own run.
+            candidate["rank"] = position
+            result.append(candidate)
+        return result
+
+    def count_for_project(self, project_id: str) -> int:
+        with self.db.session() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total FROM candidates c"
+                " JOIN analysis_runs r ON r.id = c.analysis_run_id"
+                " WHERE c.project_id = ? AND r.superseded = 0",
+                (project_id,),
+            ).fetchone()
+        return int(row["total"] if row else 0)
 
     def get(self, project_id: str, candidate_id: str) -> dict:
         with self.db.session() as conn:
