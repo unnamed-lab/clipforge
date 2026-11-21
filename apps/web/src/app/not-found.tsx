@@ -1,12 +1,12 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { BrandMark } from "@/components/brand-mark";
+import { BrandLogo } from "@/components/brand-logo";
 
 export default function NotFound() {
   return (
     <div className="flex min-h-[62vh] flex-col items-center justify-center px-1 text-center">
       <div className="mb-6 grid size-16 place-items-center rounded-xl border border-white/10 bg-ink-900">
-        <BrandMark className="size-9 text-ember-500" />
+        <BrandLogo className="size-11 rounded-lg" />
       </div>
       <p className="label mb-2">404</p>
       <h1 className="text-[26px] font-semibold leading-tight text-mist-50 sm:text-3xl">

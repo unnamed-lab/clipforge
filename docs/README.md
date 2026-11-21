@@ -25,6 +25,7 @@ This index separates current reference material from dated implementation record
 | [Video enhancement](ENHANCEMENT.md) | Enhancement audit, model/licence evaluation, geometry, cache, measured throughput and limits | Current |
 | [Render performance](PERFORMANCE.md) | Benchmark workload, per-stage timings, 5 ms/frame verdict, optimisations and regression gate | Current |
 | [Environment variables](deployment/ENVIRONMENT_VARIABLES.md) | Every supported setting | Authoritative |
+| [Branding](BRANDING.md) | Logo files, placement, palette and social preview | Current |
 | [Local development](deployment/LOCAL_DEVELOPMENT.md) | Host prerequisites, install, run, checks | Current |
 | [Docker](deployment/DOCKER.md) | Compose services, volumes, Supabase caveats | Current |
 | [Render](deployment/RENDER.md) | Blueprint topology, cost, limits | Current at the date written; confirm Render pricing |

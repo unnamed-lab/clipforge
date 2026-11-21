@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { FolderOpen, LayoutTemplate, Menu, Plus, Settings, X } from "lucide-react";
-import { BrandMark } from "@/components/brand-mark";
+import { BrandLogo } from "@/components/brand-logo";
 import { Tooltip } from "@/components/ui";
 import { cn } from "@/lib/utils";
 
@@ -77,7 +77,7 @@ export function SiteHeader({ workerUrl }: { workerUrl: string }) {
           className="group -my-2 flex shrink-0 items-center gap-2.5 py-2"
           aria-label="Clipforge home"
         >
-          <BrandMark className="size-7 text-ember-500" />
+          <BrandLogo className="size-7 rounded-[7px] ring-1 ring-white/10" />
           <span className="text-[15px] font-semibold tracking-[0.015em] text-mist-50">Clipforge</span>
         </Link>
 

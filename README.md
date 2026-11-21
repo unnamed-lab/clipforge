@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="apps/web/public/brand/clipforge-banner.webp" alt="Clipforge: a fox resting on a clapperboard beside the Clipforge wordmark" width="100%">
+</p>
+
 # Clipforge
 
 **A local-first video repurposing studio.** Import a long recording, transcribe it on your own machine, find the moments worth keeping, tighten the edges, and export captioned clips with title, caption, hashtag and keyword suggestions.

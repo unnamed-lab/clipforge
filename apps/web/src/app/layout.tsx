@@ -13,6 +13,7 @@ const dmSans = DM_Sans({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.RENDER_EXTERNAL_URL ?? "http://localhost:3000"),
   title: {
     default: "Clipforge — find the clips hidden in your recordings",
     template: "%s · Clipforge",
@@ -20,8 +21,8 @@ export const metadata: Metadata = {
   description:
     "A local-first video repurposing studio. Transcribe, find the moments worth keeping, edit the edges, and export captioned vertical clips without sending your media anywhere.",
   applicationName: "Clipforge",
-  icons: {
-    icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
+  twitter: {
+    card: "summary_large_image",
   },
 };
 
