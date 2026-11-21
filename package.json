@@ -18,6 +18,7 @@
     "test": "pnpm --filter @clipforge/web test",
     "test:e2e": "playwright test",
     "test:worker": "node scripts/worker.mjs test",
+    "benchmark:render": "node scripts/worker.mjs benchmark",
     "lint:worker": "node scripts/worker.mjs lint",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up --build",

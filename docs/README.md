@@ -23,6 +23,7 @@ This index separates current reference material from dated implementation record
 | [Architecture](ARCHITECTURE.md) | Service boundaries, storage rules, job model, security | Core shape current; data model predates later tables |
 | [Processing pipeline](PROCESSING_PIPELINE.md) | Import through render and cleanup | Current for the core analysis path; editorial and packaging stages are documented separately |
 | [Video enhancement](ENHANCEMENT.md) | Enhancement audit, model/licence evaluation, geometry, cache, measured throughput and limits | Current |
+| [Render performance](PERFORMANCE.md) | Benchmark workload, per-stage timings, 5 ms/frame verdict, optimisations and regression gate | Current |
 | [Environment variables](deployment/ENVIRONMENT_VARIABLES.md) | Every supported setting | Authoritative |
 | [Local development](deployment/LOCAL_DEVELOPMENT.md) | Host prerequisites, install, run, checks | Current |
 | [Docker](deployment/DOCKER.md) | Compose services, volumes, Supabase caveats | Current |

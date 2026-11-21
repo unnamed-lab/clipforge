@@ -84,6 +84,11 @@ switch (command) {
     console.log(`[worker] ${python} -m ruff check src tests`);
     run(["-m", "ruff", "check", "src", "tests"]);
     break;
+  case "benchmark": {
+    const passthrough = rest[0] === "--" ? rest.slice(1) : rest;
+    run(["-m", "clipforge.benchmark.render", ...passthrough]);
+    break;
+  }
   case "python":
     console.log(python);
     break;

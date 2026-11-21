@@ -630,7 +630,7 @@ def test_crop_segment_uses_measured_x_and_y_offsets(tmp_path: Path):
 
     # then
     graph = command.args[command.args.index("-filter_complex") + 1]
-    assert "crop=1080:1920:(iw-ow)*0.0000:(ih-oh)*1.0000" in graph
+    assert "crop=608:1080:0:0,scale=1080:1920:flags=bicubic" in graph
 
 
 def test_stack_chain_splits_the_game_and_the_facecam(tmp_path: Path):
@@ -688,7 +688,7 @@ def test_facecam_focus_crops_the_source_before_filling(tmp_path: Path):
 
     # then
     graph = command.args[command.args.index("-filter_complex") + 1]
-    assert "crop=iw*0.2600:ih*0.2800:iw*0.6800:ih*0.6600,scale=1080:1920" in graph
+    assert "crop=500:302:1306:713,crop=170:302:165:0,scale=1080:1920:flags=bicubic" in graph
 
 
 # --- tracked face-cam layouts ------------------------------------------------

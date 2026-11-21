@@ -338,7 +338,7 @@ def test_enhanced_input_keeps_audio_on_the_original_source(tmp_path):
     assert "[1:a]" in graph
     assert "hqdn3d" not in graph  # the intermediate was already denoised
     assert "ass=captions.ass:fontsdir=fonts" in graph
-    assert "scale=1920:1080:force_original_aspect_ratio=increase:flags=lanczos" in graph
+    assert "scale=1920:1080:flags=lanczos" in graph
 
 
 def test_clean_profile_denoises_the_source_once(tmp_path):
@@ -402,11 +402,9 @@ def test_preview_and_export_share_the_same_framing_chain(tmp_path):
     # then
     export_graph = export.args[export.args.index("-filter_complex") + 1]
     preview_graph = preview.args[preview.args.index("-filter_complex") + 1]
-    chain = "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos"
+    chain = "crop=406:720:350:0,scale=1080:1920:flags=bicubic"
     assert chain in export_graph
     assert chain in preview_graph
-    assert "crop=1080:1920:(iw-ow)*0.4000:(ih-oh)*0.4500" in export_graph
-    assert "crop=1080:1920:(iw-ow)*0.4000:(ih-oh)*0.4500" in preview_graph
 
 
 # --- fallback and cancellation ------------------------------------------------

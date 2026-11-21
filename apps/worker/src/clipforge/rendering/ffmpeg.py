@@ -68,6 +68,50 @@ def _foreground_rect(decision: CompositionDecision, source_aspect: float, target
     return decision.foreground or _fit_rect(source_aspect, target_aspect, decision.fit_margin_pct)
 
 
+def _crop_to_target(
+    *,
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+    x: float,
+    y: float,
+    source_rect: Rect | None = None,
+) -> tuple[str, int, int]:
+    """Crop the source to the output aspect before scaling.
+
+    Scaling a 1280×720 source up to 3413×1920 just to crop a 405×720 slice is
+    three times the pixels of the crop itself. Cropping first and then scaling
+    the used region is both faster and avoids an unnecessary resample.
+    """
+    sw, sh = source_width, source_height
+    prefix = ""
+    if source_rect is not None:
+        rw = _even(max(2, source_rect.width_pct * sw))
+        rh = _even(max(2, source_rect.height_pct * sh))
+        sx = max(0, min(sw - rw, int(round(source_rect.x_pct * sw))))
+        sy = max(0, min(sh - rh, int(round(source_rect.y_pct * sh))))
+        prefix = f"crop={rw}:{rh}:{sx}:{sy},"
+        sw, sh = rw, rh
+    target_ar = target_width / max(1, target_height)
+    source_ar = sw / max(1, sh)
+    if source_ar > target_ar:
+        cw = _even(max(2, sh * target_ar))
+        ch = sh
+        cx = max(0, min(sw - cw, int(round((sw - cw) * x))))
+        cy = 0
+    elif source_ar < target_ar:
+        cw = sw
+        ch = _even(max(2, sw / target_ar))
+        cx = 0
+        cy = max(0, min(sh - ch, int(round((sh - ch) * y))))
+    else:
+        cw, ch = sw, sh
+        cx = cy = 0
+    crop = "" if (cw >= sw and ch >= sh) else f"crop={cw}:{ch}:{cx}:{cy},"
+    return f"{prefix}{crop}", cw, ch
+
+
 def _composition_chain(
     decision: CompositionDecision,
     *,
@@ -77,6 +121,9 @@ def _composition_chain(
     target_aspect: float,
     input_label: str,
     output_label: str,
+    source_width: int | None = None,
+    source_height: int | None = None,
+    prefer_bicubic: bool = False,
     fps: int = 30,
 ) -> str:
     uid = output_label
@@ -161,17 +208,34 @@ def _composition_chain(
     if mode == "crop":
         x = max(0.0, min(1.0, decision.crop_x_pct / 100))
         y = max(0.0, min(1.0, decision.crop_y_pct / 100))
-        source_crop = ""
-        if decision.source_rect is not None:
-            source = decision.source_rect
-            source_crop = (
-                f"crop=iw*{source.width_pct:.4f}:ih*{source.height_pct:.4f}:"
-                f"iw*{source.x_pct:.4f}:ih*{source.y_pct:.4f},"
+        if source_width and source_height:
+            crop, source_w, source_h = _crop_to_target(
+                source_width=source_width,
+                source_height=source_height,
+                target_width=width,
+                target_height=height,
+                x=x,
+                y=y,
+                source_rect=decision.source_rect,
             )
-        chain = (
-            f"{input_label}{source_crop}scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
-            f"crop={width}:{height}:(iw-ow)*{x:.4f}:(ih-oh)*{y:.4f},setsar=1"
-        )
+            flags = (
+                "bicubic"
+                if prefer_bicubic and (source_w < width or source_h < height)
+                else "lanczos"
+            )
+            chain = f"{input_label}{crop}scale={width}:{height}:flags={flags},setsar=1"
+        else:
+            source_crop = ""
+            if decision.source_rect is not None:
+                source = decision.source_rect
+                source_crop = (
+                    f"crop=iw*{source.width_pct:.4f}:ih*{source.height_pct:.4f}:"
+                    f"iw*{source.x_pct:.4f}:ih*{source.y_pct:.4f},"
+                )
+            chain = (
+                f"{input_label}{source_crop}scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={width}:{height}:(iw-ow)*{x:.4f}:(ih-oh)*{y:.4f},setsar=1"
+            )
         return chain + f"[{output_label}]"
 
     if mode == "pip":
@@ -234,7 +298,8 @@ def _composition_chain(
 
 def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
                    output_label: str, segment: SegmentSpan, source_aspect: float,
-                   fps: int = 30) -> str:
+                   fps: int = 30, source_width: int | None = None,
+                   source_height: int | None = None) -> str:
     if segment.composition is not None:
         return _composition_chain(
             segment.composition,
@@ -244,6 +309,9 @@ def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
             target_aspect=width / height,
             input_label=input_label,
             output_label=output_label,
+            source_width=source_width,
+            source_height=source_height,
+            prefer_bicubic=spec.enhancement.profile in {"standard", "clean"},
             fps=fps,
         )
     if spec.video.framing == "blur":
@@ -258,6 +326,22 @@ def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
             f"[bgblur_{uid}][fgfit_{uid}]overlay=(W-w)/2:(H-h)/2[composed_{uid}];"
             f"[composed_{uid}]setsar=1"
         )
+    elif source_width and source_height:
+        crop, source_w, source_h = _crop_to_target(
+            source_width=source_width,
+            source_height=source_height,
+            target_width=width,
+            target_height=height,
+            x=0.5,
+            y=0.5,
+        )
+        flags = (
+            "bicubic"
+            if spec.enhancement.profile in {"standard", "clean"}
+            and (source_w < width or source_h < height)
+            else "lanczos"
+        )
+        chain = f"{input_label}{crop}scale={width}:{height}:flags={flags},setsar=1"
     else:
         chain = (
             f"{input_label}scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
@@ -440,7 +524,8 @@ def build_command(
             video_label = f"[src{index}]"
         filters.append(
             _framing_chain(
-                spec, width, height, video_label, f"v{index}", segment, source_aspect, fps=fps
+                spec, width, height, video_label, f"v{index}", segment, source_aspect,
+                fps=fps, source_width=source_width, source_height=source_height,
             )
         )
         video_inputs.append(f"[v{index}]")
@@ -507,7 +592,8 @@ def build_preview_command(
     at = midpoint if at_ms is None else at_ms
     at = max(segment.start_ms, min(max(segment.start_ms, segment.end_ms - 1), int(at)))
     chain = _framing_chain(
-        spec, width, height, "[0:v]", "vpreview", segment, source_aspect, fps=30
+        spec, width, height, "[0:v]", "vpreview", segment, source_aspect, fps=30,
+        source_width=source_width, source_height=source_height,
     )
     filters = f"{chain};[vpreview]format=yuvj420p[preview]"
     args: list[str] = [
@@ -546,7 +632,8 @@ def build_image_preview_command(
         filters.append(f"{label}{noise_filter}[noisy]")
         label = "[noisy]"
     chain = _framing_chain(
-        spec, width, height, label, "vpreview", segment, source_aspect, fps=_fps(spec, None)
+        spec, width, height, label, "vpreview", segment, source_aspect, fps=_fps(spec, None),
+        source_width=source_width, source_height=source_height,
     )
     filters.append(f"{chain};[vpreview]format=yuvj420p[preview]")
     args: list[str] = [

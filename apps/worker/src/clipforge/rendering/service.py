@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -246,6 +247,15 @@ def perform_render(
     cancel_event: threading.Event,
     should_cancel: Callable[[], bool],
 ) -> dict:
+    render_started = time.monotonic()
+    stage_timings: dict[str, float] = {}
+    stage_cursor = {"at": render_started}
+
+    def mark_stage(name: str) -> None:
+        now = time.monotonic()
+        stage_timings[name] = round(now - stage_cursor["at"], 3)
+        stage_cursor["at"] = now
+
     render = repos.renders.get_raw(render_id)
     spec = RenderSpec.model_validate(json.loads(render["spec_json"] or "{}"))
     project_id = render["project_id"]
@@ -282,12 +292,14 @@ def perform_render(
         raise JobFailed("source_missing", exc.message) from exc
 
     ensure_space(settings, paths, required_bytes=400 * 1024 * 1024)
+    mark_stage("setup")
     logo_requested = bool(spec.logo.enabled)
     on_stage("assets", 2, "Checking brand assets and audio policy")
     warnings = [
         *encode_warnings,
         *_prepare_assets(spec, repos, storage, work),
     ]
+    mark_stage("assets")
     overlay_report = {
         "requested": logo_requested,
         "applied": bool(spec.logo.enabled and spec.logo.asset_name == LOGO_FILENAME),
@@ -320,6 +332,7 @@ def perform_render(
     repos.renders.update_spec(render_id, spec.model_dump())
     warnings.extend(plan.warnings)
     warnings = list(dict.fromkeys(warnings))
+    mark_stage("compose")
 
     spans = [(segment.start_ms, segment.end_ms) for segment in spec.segments]
     compositions = [segment.composition for segment in spec.segments]
@@ -349,6 +362,7 @@ def perform_render(
             else:
                 warnings.append("Captions were requested but this span has no word timings.")
 
+    mark_stage("captions")
     enhanced_report: dict = {}
     if spec.enhancement.uses_ai:
         on_stage("enhancing", 4, "Preparing the AI enhancement pass")
@@ -379,6 +393,7 @@ def perform_render(
         warnings.extend(enhancement.warnings)
         enhanced_inputs = enhancement.video_inputs
 
+    mark_stage("enhance")
     applied_model = enhanced_report.get("applied_model")
     warnings.extend(_export_resolution_warnings(source, spec, applied_model=applied_model))
     warnings.extend(_compression_cap_warning(spec))
@@ -414,6 +429,7 @@ def perform_render(
             "check the logo and music files, then try again.",
         ) from exc
 
+    mark_stage("encode")
     on_stage("validating", 95, "Checking the output file")
     output = work / OUTPUT_FILENAME
     if not output.exists() or output.stat().st_size < 4096:
@@ -494,6 +510,28 @@ def perform_render(
     if sidecar_text:
         warnings.append("Subtitles were exported as a separate .srt file.")
     on_stage("done", 100, "Render complete")
+    mark_stage("validate")
+
+    total_seconds = time.monotonic() - render_started
+    target_fps = float(spec.video.fps or source.get("fps") or 30.0)
+    if spec.encode.max_fps:
+        target_fps = min(target_fps, float(spec.encode.max_fps))
+    target_fps = max(15.0, min(60.0, target_fps))
+    output_frames = max(1, int(round(spec.total_duration_ms / 1000 * target_fps)))
+    metrics = {
+        "total_seconds": round(total_seconds, 3),
+        "stages": stage_timings,
+        "output_frames": output_frames,
+        "ms_per_frame": round(total_seconds * 1000 / output_frames, 3),
+        "encode_ms_per_frame": round(outcome.duration_seconds * 1000 / output_frames, 3),
+        "source": {"width": source.get("width"), "height": source.get("height"), "fps": source.get("fps")},
+        "output": {"width": info.width, "height": info.height, "fps": target_fps},
+        "codec": spec.encode.codec,
+        "preset": spec.encode.x264_preset,
+        "enhancement": enhanced_report.get("profile") if enhanced_report else None,
+        "applied_model": enhanced_report.get("applied_model") if enhanced_report else None,
+        "cold_start_included": True,
+    }
 
     return {
         "render_id": render_id,
@@ -505,5 +543,6 @@ def perform_render(
         "warnings": warnings,
         "review": gate,
         "enhancement": enhanced_report,
+        "metrics": metrics,
         "encode_seconds": round(outcome.duration_seconds, 1),
     }

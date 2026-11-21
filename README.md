@@ -214,6 +214,7 @@ See [Render deployment](docs/deployment/RENDER.md), [Storage and workers](docs/d
 | `pnpm lint` | Web ESLint. |
 | `pnpm test` | Web unit tests (Vitest). |
 | `pnpm test:worker` | Worker pytest suite (add `-- -m "not slow"` for the fast set). |
+| `pnpm benchmark:render` | Repeatable render benchmark suite; see [Render performance](docs/PERFORMANCE.md). |
 | `pnpm lint:worker` | Worker Ruff check. |
 | `node scripts/verify.mjs` | Typecheck, both linters, shared/web tests and fast worker tests, in fail-fast order. |
 | `node scripts/verify.mjs --build` | Adds the production Next.js build. |
@@ -285,6 +286,7 @@ data/                  Runtime data (git-ignored)
 | [Documentation index](docs/README.md) | What each document covers and which ones are dated records. |
 | [User guide](docs/USER_GUIDE.md) | End-to-end workflow, editor controls and export behaviour. |
 | [Video enhancement](docs/ENHANCEMENT.md) | Root-cause audit, model/licence evaluation, pipeline order, measured CPU throughput and remaining limits. |
+| [Render performance](docs/PERFORMANCE.md) | Reproducible benchmarks, per-stage timings, the 5 ms/frame verdict and the performance regression gate. |
 | [API reference](docs/API.md) | Worker routes, authentication, job model and examples. |
 | [Known limitations](docs/KNOWN_LIMITATIONS.md) | What is deliberately absent, and what "verified" means here. |
 | [Architecture](docs/ARCHITECTURE.md) | Service boundaries, data model, job model and security rules. |
