@@ -294,6 +294,7 @@ def perform_render(
         ),
     )
     spec.segments = plan.segments
+    spec.facecam_track = plan.facecam_track
     repos.renders.update_spec(render_id, spec.model_dump())
     warnings.extend(plan.warnings)
     warnings = list(dict.fromkeys(warnings))

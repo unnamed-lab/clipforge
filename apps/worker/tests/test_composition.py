@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import numpy as np
+import pytest
+from PIL import Image
 
 from clipforge.media.visual import classify_features, frame_features
+from clipforge.media.facecam import FaceCamTrack, TrackRange
 from clipforge.quality.boundaries import review_ending
 from clipforge.ranking.sentences import Sentence
 from clipforge.rendering.composition import decide_composition, expand_composition, fit_rect
-from clipforge.rendering.ffmpeg import build_command
+from clipforge.rendering import composition as composition_module
+from clipforge.rendering.ffmpeg import build_command, build_preview_command, execute
 from clipforge.rendering.spec import (
     CAPTION_PRESETS,
     CaptionBand,
@@ -48,6 +53,35 @@ def _words() -> list[dict]:
             words.append({"start_ms": cursor, "end_ms": cursor + 240, "word": token})
             cursor += 260
     return words
+
+
+def test_webcam_panel_crop_stays_inside_the_accepted_rect_and_off_the_gameplay_crop():
+    # given a small upper-left webcam and a 9:16 stack
+    scene = Scene(0, 5_000, "mixed", 0.8, 0.5)
+    facecam = Rect(x_pct=0.01, y_pct=0.32, width_pct=0.20, height_pct=0.22)
+    face = Rect(x_pct=0.09, y_pct=0.40, width_pct=0.03, height_pct=0.07)
+    spec = _spec(composition="stack", face_cam_position="top", stack_split_pct=60)
+
+    # when
+    decision = decide_composition(
+        scene, spec, 1280, 720,
+        forced="stack",
+        facecam_override=facecam,
+        facecam_face_rect=face,
+    )
+
+    # then
+    panel = decision.facecam_panel_rect
+    assert panel is not None
+    assert panel.x_pct >= facecam.x_pct - 1e-6
+    assert panel.y_pct >= facecam.y_pct - 1e-6
+    assert panel.x_pct + panel.width_pct <= facecam.x_pct + facecam.width_pct + 1e-6
+    assert panel.y_pct + panel.height_pct <= facecam.y_pct + facecam.height_pct + 1e-6
+    game = decision.gameplay_rect
+    assert game is not None
+    overlap_x = max(0.0, min(panel.x_pct + panel.width_pct, game.x_pct + game.width_pct) - max(panel.x_pct, game.x_pct))
+    overlap_y = max(0.0, min(panel.y_pct + panel.height_pct, game.y_pct + game.height_pct) - max(panel.y_pct, game.y_pct))
+    assert overlap_x * overlap_y == 0.0
 
 
 # --- geometry ----------------------------------------------------------------
@@ -625,9 +659,11 @@ def test_stack_chain_splits_the_game_and_the_facecam(tmp_path: Path):
     graph = command.args[command.args.index("-filter_complex") + 1]
     assert "split=2[gamesrc_v0][camsrc_v0]" in graph
     assert "crop=iw*0.2600:ih*0.2800:iw*0.6800:ih*0.6600" in graph
-    assert "overlay=0:0:shortest=1[stacked_v0]" in graph
-    assert "overlay=0:1152:shortest=1[composed_v0]" in graph
-    assert "color=c=#0B0D11" in graph
+    # Two full-width panels stacked to the output height, in the requested order.
+    assert "[game_v0][cam_v0]vstack=inputs=2[composed_v0]" in graph
+    assert "scale=1080:1152" in graph
+    assert "scale=1080:768" in graph
+    assert "color=c=#0B0D11" not in graph
 
 
 def test_facecam_focus_crops_the_source_before_filling(tmp_path: Path):
@@ -653,6 +689,249 @@ def test_facecam_focus_crops_the_source_before_filling(tmp_path: Path):
     # then
     graph = command.args[command.args.index("-filter_complex") + 1]
     assert "crop=iw*0.2600:ih*0.2800:iw*0.6800:ih*0.6600,scale=1080:1920" in graph
+
+
+# --- tracked face-cam layouts ------------------------------------------------
+
+
+def _facecam_scene(
+    *,
+    start_ms: int = 0,
+    end_ms: int = 10_000,
+    rect: tuple[float, float, float, float] = (0.70, 0.65, 0.25, 0.30),
+    content_type: str = "mixed",
+) -> Scene:
+    return Scene(
+        start_ms=start_ms,
+        end_ms=end_ms,
+        content_type=content_type,
+        confidence=0.8,
+        subject_x=0.5,
+        features={
+            "facecam_present": 1.0,
+            "facecam_confidence": 0.9,
+            "facecam_x": rect[0],
+            "facecam_y": rect[1],
+            "facecam_width": rect[2],
+            "facecam_height": rect[3],
+            "skin_fraction": 0.02,
+            "content_x": 0.0,
+            "content_y": 0.0,
+            "content_width": 1.0,
+            "content_height": 1.0,
+        },
+    )
+
+
+def test_stack_panels_match_the_actual_layout_aspect_not_a_square():
+    # given a 16:9 source stacked into a 9:16 output with a 55% gameplay panel
+    spec = _spec(composition="stack", aspect="9:16", resolution=1080, stack_split_pct=55)
+
+    # when
+    decision = decide_composition(
+        _facecam_scene(), spec, 1920, 1080, forced="stack", facecam_state="visible"
+    )
+
+    # then
+    assert decision.mode == "stack"
+    assert decision.gameplay_rect is not None
+    assert decision.facecam_panel_rect is not None
+    width, height = spec.video.dimensions
+    game_aspect = width / (height * decision.stack_split_pct / 100)
+    cam_aspect = width / (height * (1 - decision.stack_split_pct / 100))
+    game_source_aspect = (
+        decision.gameplay_rect.width_pct * 1920 / (decision.gameplay_rect.height_pct * 1080)
+    )
+    cam_source_aspect = (
+        decision.facecam_panel_rect.width_pct
+        * 1920
+        / (decision.facecam_panel_rect.height_pct * 1080)
+    )
+    assert abs(game_source_aspect - game_aspect) < 0.02
+    assert abs(cam_source_aspect - cam_aspect) < 0.02
+
+
+def test_stack_facecam_position_changes_the_panel_order_and_caption_band():
+    # given the same source and split with the face-cam above and below
+    bottom_spec = _spec(composition="stack", stack_split_pct=60, face_cam_position="bottom")
+    top_spec = _spec(composition="stack", stack_split_pct=60, face_cam_position="top")
+
+    # when
+    bottom = decide_composition(_facecam_scene(), bottom_spec, 1920, 1080, forced="stack")
+    top = decide_composition(_facecam_scene(), top_spec, 1920, 1080, forced="stack")
+
+    # then
+    assert bottom.face_cam_position == "bottom"
+    assert top.face_cam_position == "top"
+    assert bottom.caption_band is not None and top.caption_band is not None
+    assert bottom.caption_band.bottom_pct <= 0.60
+    assert top.caption_band.top_pct >= 0.40
+    assert bottom.caption_band.top_pct != top.caption_band.top_pct
+
+
+def test_stack_without_a_face_cam_falls_back_and_explains_why():
+    # given a source with no detectable webcam
+    spec = _spec(composition="stack")
+    scene = Scene(0, 10_000, "mixed", 0.8, 0.5, features={"facecam_present": 0.0})
+
+    # when
+    decision = decide_composition(scene, spec, 1920, 1080, forced="stack", facecam_state="missing")
+
+    # then
+    assert decision.mode == "crop"
+    assert decision.facecam is None
+    assert any("No face-cam was detected" in warning for warning in decision.warnings)
+
+
+def test_adaptive_stack_is_opt_in_and_bounded():
+    # given a large face-cam and the same split
+    scene = _facecam_scene(rect=(0.55, 0.50, 0.40, 0.46))
+    stable_spec = _spec(composition="stack", stack_split_pct=60, adaptive_stack=False)
+    adaptive_spec = _spec(composition="stack", stack_split_pct=60, adaptive_stack=True)
+
+    # when
+    stable = decide_composition(scene, stable_spec, 1920, 1080, forced="stack")
+    adaptive = decide_composition(scene, adaptive_spec, 1920, 1080, forced="stack")
+
+    # then
+    assert stable.stack_split_pct == 60
+    assert 35 <= adaptive.stack_split_pct <= 80
+    assert adaptive.stack_split_pct != stable.stack_split_pct
+
+
+def test_gameplay_crop_records_protected_regions_and_stays_in_frame():
+    # given HUD detail in the top-left and a face-cam bottom-right
+    scene = _facecam_scene()
+    scene.features.update(
+        {
+            "grid_edge_0": 0.30,
+            "grid_edge_2": 0.18,
+            "grid_edge_6": 0.12,
+            "content_x": 0.05,
+            "content_y": 0.05,
+            "content_width": 0.90,
+            "content_height": 0.80,
+        }
+    )
+    spec = _spec(composition="stack", stack_split_pct=50)
+
+    # when
+    decision = decide_composition(scene, spec, 1920, 1080, forced="stack")
+
+    # then
+    assert decision.protected_regions
+    assert decision.gameplay_rect is not None
+    rect = decision.gameplay_rect
+    assert 0 <= rect.x_pct <= 1
+    assert 0 <= rect.y_pct <= 1
+    assert rect.x_pct + rect.width_pct <= 1.0001
+    assert rect.y_pct + rect.height_pct <= 1.0001
+
+
+def _fake_track(ranges: list[TrackRange]) -> FaceCamTrack:
+    return FaceCamTrack(observations=[], ranges=ranges, sample_fps=1.0)
+
+
+def test_expand_composition_splits_a_segment_when_the_face_cam_disappears(monkeypatch):
+    # given a ten second segment whose webcam disappears halfway through
+    spec = _spec(segments=[{"start_ms": 0, "end_ms": 10_000}], composition="stack")
+    track = _fake_track(
+        [
+            TrackRange(0, 5_000, "visible", (0.70, 0.65, 0.25, 0.30), 0.9, "stable"),
+            TrackRange(5_000, 10_000, "missing", None, 0.0, "gone"),
+        ]
+    )
+    analysis = SceneAnalysis(
+        scenes=[_facecam_scene(start_ms=0, end_ms=10_000)],
+        samples=[],
+        cuts=[],
+        facecam_track=track,
+    )
+    monkeypatch.setattr(
+        composition_module, "analyse_source_window", lambda *args, **kwargs: analysis
+    )
+
+    # when
+    plan = expand_composition(spec, Path("source.mp4"), 1920, 1080)
+
+    # then
+    assert [(item.start_ms, item.end_ms) for item in plan.segments] == [(0, 5_000), (5_000, 10_000)]
+    assert plan.segments[0].composition.mode == "stack"
+    assert plan.segments[1].composition.mode == "crop"
+    assert plan.facecam_track is not None
+    assert len(plan.facecam_track.ranges) == 2
+    assert any(
+        "No face-cam was detected" in warning
+        for warning in plan.segments[1].composition.warnings
+    )
+
+
+def test_expand_composition_keeps_a_manual_range_authoritative(monkeypatch):
+    # given a user correction inside an otherwise tracked segment
+    spec = _spec(segments=[{"start_ms": 0, "end_ms": 6_000}], composition="stack")
+    track = _fake_track(
+        [
+            TrackRange(0, 2_000, "visible", (0.70, 0.65, 0.25, 0.30), 0.9, "stable"),
+            TrackRange(2_000, 4_000, "manual", (0.05, 0.05, 0.20, 0.20), 1.0, "user moved it"),
+            TrackRange(4_000, 6_000, "visible", (0.70, 0.65, 0.25, 0.30), 0.9, "stable"),
+        ]
+    )
+    analysis = SceneAnalysis(
+        scenes=[_facecam_scene(start_ms=0, end_ms=6_000)],
+        samples=[],
+        cuts=[],
+        facecam_track=track,
+    )
+    monkeypatch.setattr(
+        composition_module, "analyse_source_window", lambda *args, **kwargs: analysis
+    )
+
+    # when
+    plan = expand_composition(spec, Path("source.mp4"), 1920, 1080)
+
+    # then
+    manual = [
+        item for item in plan.segments
+        if item.composition is not None and item.composition.facecam_state == "manual"
+    ]
+    assert len(manual) == 1
+    assert (manual[0].start_ms, manual[0].end_ms) == (2_000, 4_000)
+    assert manual[0].composition.facecam is not None
+    assert manual[0].composition.facecam.x_pct == 0.05
+
+
+def test_stack_chain_uses_canonical_panel_rects_and_top_order(tmp_path: Path):
+    # given a stack decision with explicit panel geometry and a top face-cam
+    spec = _spec(segments=[{"start_ms": 0, "end_ms": 4_000}], composition="stack")
+    spec.segments[0].composition = CompositionDecision(
+        mode="stack",
+        background="solid",
+        background_color="#0B0D11",
+        facecam=Rect(x_pct=0.70, y_pct=0.65, width_pct=0.25, height_pct=0.30),
+        face_cam_position="top",
+        stack_split_pct=55,
+        gameplay_rect=Rect(x_pct=0.10, y_pct=0.0, width_pct=0.60, height_pct=1.0),
+        facecam_panel_rect=Rect(x_pct=0.66, y_pct=0.60, width_pct=0.30, height_pct=0.40),
+    )
+
+    # when
+    command = build_command(
+        spec,
+        source=tmp_path / "source.mp4",
+        cwd=tmp_path,
+        has_audio=False,
+        source_fps=30.0,
+        captions_name=None,
+        source_width=1920,
+        source_height=1080,
+    )
+
+    # then
+    graph = command.args[command.args.index("-filter_complex") + 1]
+    assert "crop=iw*0.6000:ih*1.0000:iw*0.1000:ih*0.0000" in graph
+    assert "crop=iw*0.3000:ih*0.4000:iw*0.6600:ih*0.6000" in graph
+    assert "[cam_v0][game_v0]vstack=inputs=2[composed_v0]" in graph
+    assert "force_original_aspect_ratio=increase,crop=1080:1056" in graph
 
 
 # --- ending review -----------------------------------------------------------
@@ -763,3 +1042,73 @@ def test_ending_review_never_changes_the_candidate():
     assert review["end_ms"] == 40_000
     assert review["reviewed"] == "pending"
     assert review["alternatives"][0]["source"] == "current"
+
+
+REAL_FACECAM_SOURCE = (
+    Path(__file__).resolve().parents[3]
+    / "data/projects/732a882663654a8b9399a12aebe53a2a/source"
+    / "660f9c3aa87c4fe4ae19b12897861a1f.mov"
+)
+
+
+@pytest.mark.skipif(not REAL_FACECAM_SOURCE.exists(), reason="real face-cam fixture is not present")
+def test_rendered_stack_uses_the_accepted_webcam_pixels(tmp_path):
+    # given a real source with a small bordered webcam in the upper-left
+    source = REAL_FACECAM_SOURCE.resolve()
+    spec = _spec(
+        segments=[{"start_ms": 55_000, "end_ms": 80_000}],
+        composition="stack",
+        face_cam_position="top",
+        stack_split_pct=60,
+        captions_enabled=False,
+        captions_burn_in=False,
+        captions_sidecar=False,
+    )
+    plan = expand_composition(
+        spec, source, 1280, 720,
+        source_duration_ms=7_200_000,
+        cache_dir=tmp_path / "analysis",
+        analysis_height=144,
+    )
+    spec.segments = plan.segments
+    decision = plan.segments[0].composition
+    assert decision is not None and decision.facecam is not None
+    assert decision.facecam_panel_rect is not None
+
+    # when the same preview path the UI uses renders a real frame
+    work = tmp_path / "preview"
+    work.mkdir()
+    command = build_preview_command(
+        spec, segment=plan.segments[0], source=source, cwd=work,
+        at_ms=70_000, source_width=1280, source_height=720,
+    )
+    execute(command, timeout_seconds=120)
+    rendered = np.asarray(Image.open(work / command.output_name).convert("RGB"), dtype=np.float32)
+
+    # and the source frame at that time is extracted for comparison
+    source_frame = tmp_path / "source.jpg"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-ss", "70.000", "-i", str(source), "-frames:v", "1",
+            "-vf", "scale=1280:720", "-q:v", "2", str(source_frame),
+        ],
+        check=True,
+    )
+    source_rgb = Image.open(source_frame).convert("RGB")
+    panel = decision.facecam_panel_rect
+    expected = source_rgb.crop((
+        int(panel.x_pct * 1280),
+        int(panel.y_pct * 720),
+        int((panel.x_pct + panel.width_pct) * 1280),
+        int((panel.y_pct + panel.height_pct) * 720),
+    )).resize((rendered.shape[1], 768), Image.Resampling.LANCZOS)
+    expected_rgb = np.asarray(expected, dtype=np.float32)
+    top = rendered[:768]
+    bottom = rendered[1152:]
+    top_error = float(np.mean(np.abs(top - expected_rgb)))
+    cross_error = float(np.mean(np.abs(top - bottom)))
+
+    # then the top panel is the accepted webcam rectangle, not the game panel
+    assert top_error < 18.0
+    assert cross_error > top_error * 2.0

@@ -21,6 +21,8 @@ from clipforge.rendering.spec import (
     DEFAULT_CAPTION_POSITION,
     DEFAULT_CAPTION_POSITION_PCT,
     DEFAULT_CAPTION_PRESET,
+    FaceCamOverride,
+    Rect,
 )
 
 LOGO_POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "custom")
@@ -112,6 +114,18 @@ class ExportDefaults(BaseModel):
     fps: int | None = Field(default=30, ge=15, le=60)
     format: Literal["mp4"] = "mp4"
     normalise_audio: bool = True
+    # Saved layout choice. Keeping these beside the other export defaults is what
+    # makes a selected preset survive navigation and reload.
+    composition: Literal[
+        "auto", "crop", "fit", "pip", "split", "stack", "facecam_focus", "manual"
+    ] = "auto"
+    face_cam_position: Literal["top", "bottom"] = "bottom"
+    face_cam_rect: Rect | None = None
+    face_cam_overrides: list[FaceCamOverride] = Field(default_factory=list)
+    stack_split_pct: float = Field(default=60.0, ge=35.0, le=80.0)
+    adaptive_stack: bool = False
+    crop_x_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    crop_y_pct: float | None = Field(default=None, ge=0.0, le=100.0)
 
 
 class ProfileRules(BaseModel):

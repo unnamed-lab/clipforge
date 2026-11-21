@@ -1,11 +1,12 @@
 """Deterministic, CPU-only scene analysis for composition decisions.
 
-This is deliberately not a vision model. It detects cuts with FFmpeg's scene
-score, samples the window, and classifies each frame from cheap, explainable
-features: luminance, edge density, colour spread, letterboxing and a skin-tone
-centroid. The result is a scene list good enough to choose crop versus fit and
-to warn about text near the edges. OCR, face detection and saliency models can
-replace individual functions later; the composition contract stays the same.
+It detects cuts with FFmpeg's scene score, samples the window, and classifies
+each frame from cheap, explainable features: luminance, edge density, colour
+spread, letterboxing and a skin-tone centroid. When a caller needs a webcam
+track, the same frames are decoded at a higher face-detection height and passed
+through YuNet plus a bounded, explainable panel-candidate scorer. OCR and
+saliency models can replace individual functions later; the composition
+contract stays the same.
 """
 
 from __future__ import annotations
@@ -21,6 +22,19 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from clipforge.media.facecam import (
+    FaceCamTrack,
+    change_windows,
+    raw_observations,
+    track_facecam as build_facecam_track,
+)
+from clipforge.media.facecam_detect import (
+    FACECAM_DETECTOR_VERSION,
+    detect_facecam_candidates,
+    detector_available,
+    detector_error,
+    facecam_features_from_candidates,
+)
 from clipforge.media.process import ProcessFailed, require, run
 
 logger = logging.getLogger(__name__)
@@ -28,7 +42,11 @@ logger = logging.getLogger(__name__)
 SCENE_THRESHOLD = 0.28
 MIN_SCENE_MS = 1_200
 MAX_SAMPLES = 600
-CACHE_VERSION = 4
+CACHE_VERSION = 17
+# YuNet needs more pixels than the scene classifier. Sampling the tracking pass
+# at 360p keeps a small corner face above roughly 20px while the scene features
+# are still computed from the 144p proxy.
+FACECAM_ANALYSIS_HEIGHT = 360
 # Text smaller than roughly a 720p frame cannot be read back at 144p. The sample
 # height is recorded with every analysis so a conclusion that rests on an
 # unreadable frame is never presented as if the text had been verified.
@@ -45,6 +63,10 @@ class FrameSample:
     confidence: float
     subject_x: float
     features: dict
+    # Scored webcam-panel candidates for this frame. Keeping the full bounded
+    # list lets the tracker choose the candidate that continues the accepted
+    # panel, instead of trusting the globally strongest face in the frame.
+    facecam_candidates: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +75,13 @@ class FrameSample:
             "confidence": round(self.confidence, 3),
             "subject_x": round(self.subject_x, 3),
             "features": {key: round(float(value), 4) for key, value in self.features.items()},
+            "facecam_candidates": [
+                {
+                    key: round(value, 5) if isinstance(value, float) else value
+                    for key, value in candidate.items()
+                }
+                for candidate in self.facecam_candidates
+            ],
         }
 
 
@@ -89,6 +118,7 @@ class SceneAnalysis:
     cuts: list[int]
     warnings: list[str] = field(default_factory=list)
     analysis: dict = field(default_factory=dict)
+    facecam_track: FaceCamTrack | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -98,6 +128,7 @@ class SceneAnalysis:
             "cuts": self.cuts,
             "warnings": self.warnings,
             "analysis": self.analysis,
+            "facecam_track": self.facecam_track.to_dict() if self.facecam_track else None,
         }
 
     @classmethod
@@ -121,21 +152,43 @@ class SceneAnalysis:
                 confidence=float(item.get("confidence") or 0.0),
                 subject_x=float(item.get("subject_x") or 0.5),
                 features=item.get("features") or {},
+                facecam_candidates=list(item.get("facecam_candidates") or []),
             )
             for item in payload.get("samples") or []
         ]
         return cls(scenes=scenes, samples=samples, cuts=[int(value) for value in payload.get("cuts") or []],
                    warnings=list(payload.get("warnings") or []),
-                   analysis=dict(payload.get("analysis") or {}))
+                   analysis=dict(payload.get("analysis") or {}),
+                   facecam_track=FaceCamTrack.from_dict(payload.get("facecam_track")))
 
 
-def _cache_key(path: Path, start_ms: int, end_ms: int, fps: float, height: int) -> str:
+def _cache_key(
+    path: Path,
+    start_ms: int,
+    end_ms: int,
+    fps: float,
+    height: int,
+    *,
+    track: bool = False,
+    facecam_height: int = 0,
+    overrides: list[dict] | None = None,
+) -> str:
     try:
         stat = path.stat()
         identity = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     except OSError:
         identity = str(path)
-    raw = f"{CACHE_VERSION}|{identity}|{start_ms}|{end_ms}|{fps:.3f}|{height}"
+    override_digest = ""
+    if overrides:
+        override_digest = hashlib.sha1(
+            json.dumps(overrides, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:12]
+    raw = (
+        f"{CACHE_VERSION}|{identity}|{start_ms}|{end_ms}|{fps:.3f}|{height}"
+        f"|track={int(track)}|facecam_height={facecam_height}"
+        f"|detector={FACECAM_DETECTOR_VERSION if track else 'off'}"
+        f"|overrides={override_digest}"
+    )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
@@ -192,12 +245,17 @@ def _extract_samples(
     *,
     fps: float,
     analysis_height: int,
+    facecam_height: int | None = None,
 ) -> tuple[list[FrameSample], list[str], tuple[int, int] | None]:
     warnings: list[str] = []
     frames_dir.mkdir(parents=True, exist_ok=True)
     for child in frames_dir.iterdir():
         if child.is_file():
             child.unlink(missing_ok=True)
+    # Decode once at the larger of the two heights, then shrink a copy for the
+    # cheap scene features. A second FFmpeg pass would double the decode cost and
+    # still leave the two passes at different timestamps.
+    tracking_height = max(analysis_height, facecam_height or analysis_height)
     max_frames = min(MAX_SAMPLES, max(1, int(duration_ms / 1000 * fps) + 2))
     try:
         ffmpeg = require("ffmpeg")
@@ -206,7 +264,7 @@ def _extract_samples(
                 ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", f"{start_ms / 1000:.3f}", "-t", f"{max(0.2, duration_ms / 1000):.3f}",
                 "-i", str(path), "-an",
-                "-vf", f"fps={fps:.4f},scale=-2:{analysis_height}",
+                "-vf", f"fps={fps:.4f},scale=-2:{tracking_height}",
                 "-frames:v", str(max_frames), "-q:v", "4",
                 str(frames_dir / "%05d.jpg"),
             ],
@@ -217,17 +275,29 @@ def _extract_samples(
     if result.returncode != 0:
         return [], ["Frame sampling failed; composition will use a safe fallback."], None
 
+    use_yunet = bool(facecam_height) and detector_available()
     samples: list[FrameSample] = []
     frame_size: tuple[int, int] | None = None
     for index, frame in enumerate(sorted(frames_dir.glob("*.jpg")), start=0):
         try:
             with Image.open(frame) as image:
-                rgb = np.asarray(image.convert("RGB"))
+                tracking_rgb = np.asarray(image.convert("RGB"))
                 frame_size = frame_size or (int(image.width), int(image.height))
         except OSError:
             continue
         time_ms = start_ms + int(round(index * 1000 / fps))
-        features = frame_features(rgb)
+        feature_rgb = tracking_rgb
+        if tracking_rgb.shape[0] != analysis_height:
+            scaled_height = max(1, int(analysis_height))
+            scaled_width = max(1, int(round(tracking_rgb.shape[1] * scaled_height / max(1, tracking_rgb.shape[0]))))
+            feature_rgb = np.asarray(
+                Image.fromarray(tracking_rgb).resize((scaled_width, scaled_height), Image.Resampling.BILINEAR)
+            )
+        features = frame_features(feature_rgb)
+        candidates: list[dict] = []
+        if use_yunet:
+            candidates = detect_facecam_candidates(tracking_rgb)
+            features.update(facecam_features_from_candidates(candidates))
         content_type, confidence = classify_features(features)
         samples.append(FrameSample(
             time_ms=min(start_ms + duration_ms - 1, time_ms),
@@ -235,6 +305,7 @@ def _extract_samples(
             confidence=confidence,
             subject_x=float(features.get("skin_x", 0.5)),
             features=features,
+            facecam_candidates=candidates,
         ))
     if not samples:
         warnings.append("No frames could be sampled; composition will use a safe fallback.")
@@ -314,6 +385,15 @@ def frame_features(rgb: np.ndarray) -> dict:
             skin_x = float(np.median(xs) / max(1, width - 1))
     facecam = _facecam_features(skin)
 
+    grid: dict[str, float] = {}
+    for gy in range(3):
+        for gx in range(3):
+            cell = magnitude[
+                int(height * gy / 3): int(height * (gy + 1) / 3),
+                int(width * gx / 3): int(width * (gx + 1) / 3),
+            ]
+            grid[f"grid_edge_{gy * 3 + gx}"] = float(np.mean(cell > 0.12)) if cell.size else 0.0
+
     return {
         "mean_luma": float(np.mean(luma)),
         "std_luma": float(np.std(luma)),
@@ -335,16 +415,19 @@ def frame_features(rgb: np.ndarray) -> dict:
         "content_width": content_w,
         "content_height": content_h,
         **facecam,
+        **grid,
     }
 
 
 def _facecam_features(skin: np.ndarray) -> dict:
-    """Find a corner webcam plate from clustered skin tones.
+    """Find a compact webcam plate from clustered skin tones.
 
     This is intentionally a cheap, explainable heuristic, not face recognition.
-    A face-cam is a dense skin-toned blob concentrated in one corner while the
-    rest of the frame is comparatively free of it. When the test fails the
-    caller gets zeros and the renderer falls back with an explicit warning.
+    It scans a 3x3 anchor grid so a cam that moves from one corner to another is
+    still found, while preferring edge/corner cells over the centre where a
+    full-screen speaker would otherwise look like an overlay. When the test
+    fails the caller gets zeros and the renderer falls back with an explicit
+    warning.
     """
 
     empty = {
@@ -354,6 +437,9 @@ def _facecam_features(skin: np.ndarray) -> dict:
         "facecam_width": 0.0,
         "facecam_height": 0.0,
         "facecam_confidence": 0.0,
+        "facecam_skin_density": 0.0,
+        "facecam_outside_skin": 0.0,
+        "facecam_corner": 0.0,
     }
     if skin.ndim != 2 or skin.size == 0:
         return empty
@@ -364,24 +450,39 @@ def _facecam_features(skin: np.ndarray) -> dict:
     if total_skin < 40 or total_skin / skin.size > 0.30:
         return empty
 
+    cell_w = int(width * 0.34)
+    cell_h = int(height * 0.34)
     best: dict | None = None
-    for left, top in ((0.0, 0.0), (0.66, 0.0), (0.0, 0.66), (0.66, 0.66)):
-        x0 = int(left * width)
-        y0 = int(top * height)
-        x1 = min(width, x0 + int(width * 0.34))
-        y1 = min(height, y0 + int(height * 0.34))
-        region = skin[y0:y1, x0:x1]
-        if region.size == 0:
-            continue
-        count = int(region.sum())
-        density = float(region.mean())
-        concentration = count / total_skin
-        if count < 30 or density < 0.02 or concentration < 0.35:
-            continue
-        score = density * min(1.0, concentration / 0.45)
-        if best is None or score > best["score"]:
-            best = {"score": score, "density": density, "concentration": concentration,
-                    "region": region, "x0": x0, "y0": y0}
+    for anchor_x in (0.0, 0.33, 0.66):
+        for anchor_y in (0.0, 0.33, 0.66):
+            x0 = min(width - cell_w, int(anchor_x * width))
+            y0 = min(height - cell_h, int(anchor_y * height))
+            x1 = min(width, x0 + cell_w)
+            y1 = min(height, y0 + cell_h)
+            region = skin[y0:y1, x0:x1]
+            if region.size == 0:
+                continue
+            count = int(region.sum())
+            density = float(region.mean())
+            concentration = count / total_skin
+            if count < 30 or density < 0.02 or concentration < 0.35:
+                continue
+            # A centred plate is possible, but it is also how a normal
+            # full-screen speaker looks. Require more evidence there.
+            corner = anchor_x in (0.0, 0.66) and anchor_y in (0.0, 0.66)
+            edge = anchor_x in (0.0, 0.66) or anchor_y in (0.0, 0.66)
+            preference = 1.0 if corner else 0.92 if edge else 0.78
+            score = density * min(1.0, concentration / 0.45) * preference
+            if best is None or score > best["score"]:
+                best = {
+                    "score": score,
+                    "density": density,
+                    "concentration": concentration,
+                    "region": region,
+                    "x0": x0,
+                    "y0": y0,
+                    "corner": corner,
+                }
 
     if best is None:
         return empty
@@ -406,7 +507,10 @@ def _facecam_features(skin: np.ndarray) -> dict:
     bx0 = max(0, min(width - box_w, int(round(cx - box_w / 2))))
     by0 = max(0, min(height - box_h, int(round(cy - box_h / 2))))
 
+    outside_skin = (total_skin - int(region.sum())) / max(1, skin.size - region.size)
     confidence = min(0.92, 0.40 + best["density"] * 2.5 + best["concentration"] * 0.30)
+    if not best["corner"]:
+        confidence *= 0.92
     return {
         "facecam_present": 1.0,
         "facecam_x": bx0 / width,
@@ -414,6 +518,9 @@ def _facecam_features(skin: np.ndarray) -> dict:
         "facecam_width": box_w / width,
         "facecam_height": box_h / height,
         "facecam_confidence": confidence,
+        "facecam_skin_density": best["density"],
+        "facecam_outside_skin": float(outside_skin),
+        "facecam_corner": 1.0 if best["corner"] else 0.0,
     }
 
 
@@ -494,7 +601,12 @@ def _aggregate(
             "colorfulness", "std_luma", "letterboxed", "text_at_edges", "skin_fraction",
             "content_x", "content_y", "content_width", "content_height",
             "facecam_present", "facecam_x", "facecam_y", "facecam_width",
-            "facecam_height", "facecam_confidence")
+            "facecam_height", "facecam_confidence", "facecam_skin_density",
+            "facecam_outside_skin", "facecam_corner", "facecam_face_score",
+            "facecam_panel_area", "facecam_candidate_count",
+            "grid_edge_0", "grid_edge_1", "grid_edge_2",
+            "grid_edge_3", "grid_edge_4", "grid_edge_5",
+            "grid_edge_6", "grid_edge_7", "grid_edge_8")
     for key in keys:
         features[key] = float(np.mean([sample.features.get(key, 0.0) for sample in inside]))
     if content_type == "unknown":
@@ -540,6 +652,15 @@ def _boundaries_from_samples(samples: list[FrameSample], start_ms: int, end_ms: 
     return boundaries
 
 
+def _merge_samples(coarse: list[FrameSample], dense: list[FrameSample]) -> list[FrameSample]:
+    """Merge coarse and adaptive samples without duplicating a timestamp."""
+    by_time: dict[int, FrameSample] = {sample.time_ms: sample for sample in coarse}
+    for sample in dense:
+        # Dense samples carry the better evidence for their moment.
+        by_time[sample.time_ms] = sample
+    return sorted(by_time.values(), key=lambda item: item.time_ms)
+
+
 def analyse_source_window(
     path: Path,
     start_ms: int,
@@ -550,6 +671,8 @@ def analyse_source_window(
     scene_fps: float | None = None,
     analysis_height: int = DEFAULT_ANALYSIS_HEIGHT,
     source_height: int | None = None,
+    track_facecam: bool = False,
+    face_cam_overrides: list[dict] | None = None,
 ) -> SceneAnalysis:
     """Analyse one source window, caching the deterministic result on disk.
 
@@ -558,6 +681,10 @@ def analyse_source_window(
     from one taken on a frame too small to read text. Callers that hold a
     low-resolution proxy pass its height here; the source's real height is kept
     in ``source_height`` so the difference stays visible.
+
+    When ``track_facecam`` is set, the coarse sample is followed by a short,
+    denser look around every suspected face-cam change. The extra frames are
+    bounded, so a two-hour stream does not become a frame-by-frame scan.
     """
     start_ms = max(0, int(start_ms))
     end_ms = max(start_ms + 500, int(end_ms))
@@ -569,8 +696,14 @@ def analyse_source_window(
         1.0 if duration_ms <= 300_000 else 0.5
     )
     fps = sampling_fps(duration_ms, desired_fps)
+    facecam_height = max(height, FACECAM_ANALYSIS_HEIGHT) if track_facecam else 0
 
-    key = _cache_key(path, start_ms, end_ms, fps, height)
+    key = _cache_key(
+        path, start_ms, end_ms, fps, height,
+        track=track_facecam,
+        facecam_height=facecam_height,
+        overrides=face_cam_overrides,
+    )
     cache_file = (cache_dir / f"{key}.json") if cache_dir else None
     if cache_file and cache_file.exists():
         try:
@@ -585,10 +718,36 @@ def analyse_source_window(
 
         frames_dir = Path(tempfile.mkdtemp(prefix="clipforge-scenes-"))
     samples, sample_warnings, frame_size = _extract_samples(
-        path, start_ms, duration_ms, frames_dir, fps=fps, analysis_height=height
+        path, start_ms, duration_ms, frames_dir,
+        fps=fps,
+        analysis_height=height,
+        facecam_height=facecam_height or None,
     )
+    coarse_samples = list(samples)
+    dense_windows: list[tuple[int, int]] = []
+    if track_facecam and samples:
+        dense_fps = min(4.0, max(2.0, fps * 4.0))
+        dense_windows = [
+            (max(start_ms, left), min(end_ms, right))
+            for left, right in change_windows(raw_observations(samples))
+            if min(end_ms, right) > max(start_ms, left)
+        ]
+        dense_samples: list[FrameSample] = []
+        for index, (left, right) in enumerate(dense_windows):
+            dense_dir = frames_dir.parent / f"dense-{key}-{index}"
+            extra, extra_warnings, _ = _extract_samples(
+                path, left, right - left, dense_dir,
+                fps=dense_fps,
+                analysis_height=height,
+                facecam_height=facecam_height or None,
+            )
+            dense_samples.extend(extra)
+            sample_warnings.extend(extra_warnings)
+            shutil.rmtree(dense_dir, ignore_errors=True)
+        if dense_samples:
+            samples = _merge_samples(samples, dense_samples)
 
-    raw_boundaries = [start_ms, *cuts, *_boundaries_from_samples(samples, start_ms, end_ms), end_ms]
+    raw_boundaries = [start_ms, *cuts, *_boundaries_from_samples(coarse_samples, start_ms, end_ms), end_ms]
     raw_boundaries = sorted({value for value in raw_boundaries if start_ms <= value <= end_ms})
     filtered: list[int] = [raw_boundaries[0]]
     for boundary in raw_boundaries[1:]:
@@ -622,6 +781,33 @@ def analyse_source_window(
             break
 
     warnings = list(dict.fromkeys(cut_warnings + sample_warnings))
+    facecam_track = None
+    if track_facecam:
+        if not detector_available():
+            detail = detector_error() or "the ONNX face detector is unavailable"
+            warnings.append(
+                f"Webcam-panel detection is unavailable ({detail}); the older skin-tone fallback was used. "
+                "Review the face-cam region before export."
+            )
+        facecam_track = build_facecam_track(
+            samples,
+            start_ms,
+            end_ms,
+            overrides=face_cam_overrides or [],
+            sample_fps=fps,
+        )
+        warnings.extend(facecam_track.warnings)
+        if (
+            facecam_track.ranges
+            and all(item.state == "missing" for item in facecam_track.ranges)
+            and any(float(sample.features.get("facecam_face_score", 0.0)) >= 0.5 for sample in samples)
+        ):
+            warnings.append(
+                "Faces were detected, but no bordered webcam panel was reliable. "
+                "This can be a full-screen camera or a borderless chroma-key cutout; "
+                "neither is tracked as a separate stack panel automatically. Lock a webcam region if needed."
+            )
+        warnings = list(dict.fromkeys(warnings))
     text_heavy = any(
         scene.content_type in {"slide", "screen_recording"} for scene in scenes
     ) or any(scene.features.get("text_at_edges", 0.0) > 0.5 for scene in scenes)
@@ -644,7 +830,14 @@ def analyse_source_window(
             "evidence": "detail" if height >= TEXT_READABLE_HEIGHT else "low_resolution",
             "text_verified": height >= TEXT_READABLE_HEIGHT,
             "text_heavy": text_heavy,
+            "facecam_dense_windows": len(dense_windows),
+            "facecam_track_ranges": len(facecam_track.ranges) if facecam_track else 0,
+            "facecam_detector": FACECAM_DETECTOR_VERSION if track_facecam else None,
+            "facecam_detector_available": detector_available() if track_facecam else None,
+            "facecam_analysis_height": facecam_height or None,
+            "feature_height": height,
         },
+        facecam_track=facecam_track,
     )
     if cache_file:
         cache_file.parent.mkdir(parents=True, exist_ok=True)

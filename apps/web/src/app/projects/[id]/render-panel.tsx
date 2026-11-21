@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Download, Film, Loader2, Type } from "lucide-react";
 import type { Capabilities, Render } from "@clipforge/shared";
 import {
@@ -15,6 +15,8 @@ import {
   DEFAULT_CAPTION_POSITION,
   DEFAULT_CAPTION_POSITION_PCT,
   DEFAULT_CAPTION_PRESET,
+  DEFAULT_FACE_CAM_POSITION,
+  FACE_CAM_POSITIONS,
   GAMING_PRESETS,
   formatBytes,
   formatDuration,
@@ -29,6 +31,7 @@ type CaptionPresetId = (typeof CAPTION_PRESETS)[number]["id"];
 type CaptionPositionId = (typeof CAPTION_POSITIONS)[number]["id"];
 type CaptionAlignmentId = (typeof CAPTION_ALIGNMENTS)[number]["id"];
 type CompositionModeId = (typeof COMPOSITION_MODES)[number]["id"];
+type FaceCamPositionId = (typeof FACE_CAM_POSITIONS)[number]["id"];
 type CompressionPresetId = "smallest" | "balanced" | "higher" | "custom";
 
 const COMPRESSION_FALLBACK: Record<
@@ -39,6 +42,76 @@ const COMPRESSION_FALLBACK: Record<
   balanced: { label: "Balanced", note: "CRF 23, up to 1080p, 128 kbps audio." },
   higher: { label: "Higher quality", note: "CRF 18, full resolution, 192 kbps audio." },
   custom: { label: "Custom", note: "Set the encoder values yourself." },
+};
+
+const COMPOSITION_IDS = new Set<string>(COMPOSITION_MODES.map((mode) => mode.id));
+const FACE_CAM_POSITION_IDS = new Set<string>(FACE_CAM_POSITIONS.map((entry) => entry.id));
+
+type FaceCamRect = { x_pct: number; y_pct: number; width_pct: number; height_pct: number };
+type FaceCamOverrideDraft = {
+  start_ms: number;
+  end_ms: number;
+  rect: FaceCamRect;
+  mode: "lock" | "track";
+  reason: string;
+};
+
+type DetectedFacecam = {
+  rect: FaceCamRect;
+  state: string | null;
+  confidence: number | null;
+  start_ms: number;
+  end_ms: number;
+};
+
+type CompositionPreviewResponse = {
+  image: string;
+  width: number;
+  height: number;
+  fingerprint: string;
+  composition: string;
+  face_cam_position: string;
+  stack_split_pct: number;
+  segment: { start_ms: number; end_ms: number; duration_ms: number };
+  decision: {
+    mode: string;
+    reason: string;
+    caption_band: { top_pct: number; bottom_pct: number } | null;
+    warnings: string[];
+  } | null;
+  facecam: {
+    detected: boolean;
+    rect: Record<string, number> | null;
+    state?: string | null;
+    confidence?: number | null;
+    reason?: string | null;
+    review_required?: boolean;
+    detector?: string | null;
+    detector_available?: boolean | null;
+    analysis_height?: number | null;
+    ranges?: Array<{
+      start_ms: number;
+      end_ms: number;
+      state: string;
+      rect: Record<string, number> | null;
+      face_rect?: Record<string, number> | null;
+      confidence: number;
+      reason: string;
+    }>;
+    observations?: Array<{
+      time_ms: number;
+      state: string;
+      rect: Record<string, number> | null;
+      face_rect?: Record<string, number> | null;
+      confidence: number;
+      reason: string;
+    }>;
+    warnings?: string[];
+  };
+  gameplay_rect: Record<string, number> | null;
+  facecam_panel_rect: Record<string, number> | null;
+  fallback: boolean;
+  warnings: string[];
 };
 
 function compressionBodyFor(
@@ -55,8 +128,42 @@ function compressionBodyFor(
   };
 }
 
+function normalizeFaceCamOverrides(value: unknown): FaceCamOverrideDraft[] {
+  if (!Array.isArray(value)) return [];
+  const result: FaceCamOverrideDraft[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const raw = entry as Record<string, unknown>;
+    const rect = raw.rect;
+    if (!rect || typeof rect !== "object") continue;
+    const box = rect as Record<string, unknown>;
+    const start = Number(raw.start_ms);
+    const end = Number(raw.end_ms);
+    const x = Number(box.x_pct);
+    const y = Number(box.y_pct);
+    const width = Number(box.width_pct);
+    const height = Number(box.height_pct);
+    if (![start, end, x, y, width, height].every(Number.isFinite)) continue;
+    if (end <= start || width <= 0 || height <= 0) continue;
+    result.push({
+      start_ms: Math.max(0, Math.round(start)),
+      end_ms: Math.max(1, Math.round(end)),
+      rect: {
+        x_pct: Math.min(1, Math.max(0, x)),
+        y_pct: Math.min(1, Math.max(0, y)),
+        width_pct: Math.min(1, Math.max(0.01, width)),
+        height_pct: Math.min(1, Math.max(0.01, height)),
+      },
+      mode: raw.mode === "track" ? "track" : "lock",
+      reason: typeof raw.reason === "string" ? raw.reason.slice(0, 200) : "Manual face-cam region",
+    });
+  }
+  return result;
+}
+
 export function RenderPanel({
   projectId,
+  candidateId,
   capabilities,
   durationMs,
   renders,
@@ -66,6 +173,7 @@ export function RenderPanel({
   disabledReason,
 }: {
   projectId: string;
+  candidateId: string;
   capabilities: Capabilities | null;
   durationMs: number;
   renders: Render[];
@@ -77,6 +185,14 @@ export function RenderPanel({
   const [aspect, setAspect] = useState<AspectId>("9:16");
   const [resolution, setResolution] = useState<720 | 1080>(1080);
   const [composition, setComposition] = useState<CompositionModeId>("auto");
+  const [faceCamPosition, setFaceCamPosition] = useState<FaceCamPositionId>(DEFAULT_FACE_CAM_POSITION);
+  const [stackSplit, setStackSplit] = useState(60);
+  const [adaptiveStack, setAdaptiveStack] = useState(false);
+  const [faceCamOverrides, setFaceCamOverrides] = useState<FaceCamOverrideDraft[]>([]);
+  const [detectedFacecam, setDetectedFacecam] = useState<DetectedFacecam | null>(null);
+  const handleDetectedFacecam = useCallback((value: DetectedFacecam | null) => {
+    setDetectedFacecam(value);
+  }, []);
   const [cropX, setCropX] = useState(50);
   const [cropY, setCropY] = useState(50);
   const [captionPreset, setCaptionPreset] = useState<CaptionPresetId>(DEFAULT_CAPTION_PRESET);
@@ -109,7 +225,7 @@ export function RenderPanel({
     [compression, customCrf, customAudio, customWidth, customFps],
   );
 
-  const captionSnapshot = useMemo(
+  const settingsSnapshot = useMemo(
     () =>
       JSON.stringify({
         preset: captionPreset,
@@ -118,6 +234,13 @@ export function RenderPanel({
         alignment: captionAlignment,
         margin_v: captionMarginV,
         export_compression: compressionBody,
+        composition,
+        face_cam_position: faceCamPosition,
+        stack_split_pct: stackSplit,
+        adaptive_stack: adaptiveStack,
+        face_cam_overrides: faceCamOverrides,
+        crop_x_pct: cropX,
+        crop_y_pct: cropY,
       }),
     [
       captionPreset,
@@ -126,6 +249,13 @@ export function RenderPanel({
       captionAlignment,
       captionMarginV,
       compressionBody,
+      composition,
+      faceCamPosition,
+      stackSplit,
+      adaptiveStack,
+      faceCamOverrides,
+      cropX,
+      cropY,
     ],
   );
   const captionControlsDisabled = !captions || captionSaveState === "loading";
@@ -134,7 +264,7 @@ export function RenderPanel({
     let alive = true;
     hydratedRef.current = false;
     apiJson<{
-      resolved?: { captions?: Record<string, unknown> };
+      resolved?: { captions?: Record<string, unknown>; export?: Record<string, unknown> };
       overrides?: Record<string, unknown>;
     }>(`/api/projects/${projectId}/settings`)
       .then((loaded) => {
@@ -165,6 +295,34 @@ export function RenderPanel({
         setCaptionAlignment(alignment);
         setCaptionMarginV(margin);
 
+        // The resolved export section already includes profile defaults, so the
+        // controls show what the encoder will actually use on first paint.
+        const resolvedExport = (loaded.resolved?.export ?? {}) as Record<string, unknown>;
+        const storedComposition =
+          typeof resolvedExport.composition === "string" && COMPOSITION_IDS.has(resolvedExport.composition)
+            ? (resolvedExport.composition as CompositionModeId)
+            : "auto";
+        const storedFaceCamPosition =
+          typeof resolvedExport.face_cam_position === "string" &&
+          FACE_CAM_POSITION_IDS.has(resolvedExport.face_cam_position)
+            ? (resolvedExport.face_cam_position as FaceCamPositionId)
+            : DEFAULT_FACE_CAM_POSITION;
+        const storedSplit =
+          typeof resolvedExport.stack_split_pct === "number"
+            ? Math.min(80, Math.max(35, resolvedExport.stack_split_pct))
+            : 60;
+        const storedCropX = typeof resolvedExport.crop_x_pct === "number" ? resolvedExport.crop_x_pct : 50;
+        const storedCropY = typeof resolvedExport.crop_y_pct === "number" ? resolvedExport.crop_y_pct : 50;
+        const storedAdaptive = resolvedExport.adaptive_stack === true;
+        const storedOverrides = normalizeFaceCamOverrides(resolvedExport.face_cam_overrides);
+        setComposition(storedComposition);
+        setFaceCamPosition(storedFaceCamPosition);
+        setStackSplit(storedSplit);
+        setAdaptiveStack(storedAdaptive);
+        setFaceCamOverrides(storedOverrides);
+        setCropX(storedCropX);
+        setCropY(storedCropY);
+
         const storedExport = (loaded.overrides?.export ?? {}) as Record<string, unknown>;
         const savedCompression = storedExport.compression;
         let nextPreset: CompressionPresetId = "balanced";
@@ -194,6 +352,13 @@ export function RenderPanel({
           alignment,
           margin_v: margin,
           export_compression: compressionBodyFor(nextPreset, nextCustom),
+          composition: storedComposition,
+          face_cam_position: storedFaceCamPosition,
+          stack_split_pct: storedSplit,
+          adaptive_stack: storedAdaptive,
+          face_cam_overrides: storedOverrides,
+          crop_x_pct: storedCropX,
+          crop_y_pct: storedCropY,
         });
         hydratedRef.current = true;
         setCaptionSaveState("saved");
@@ -208,6 +373,13 @@ export function RenderPanel({
           alignment: DEFAULT_CAPTION_ALIGNMENT,
           margin_v: DEFAULT_CAPTION_MARGIN_V,
           export_compression: compressionBodyFor("balanced", { crf: 23, audio: 128, width: 1080, fps: 30 }),
+          composition: "auto",
+          face_cam_position: DEFAULT_FACE_CAM_POSITION,
+          stack_split_pct: 60,
+          adaptive_stack: false,
+          face_cam_overrides: [],
+          crop_x_pct: 50,
+          crop_y_pct: 50,
         });
         setCaptionSaveState("error");
       });
@@ -217,7 +389,7 @@ export function RenderPanel({
   }, [projectId]);
 
   useEffect(() => {
-    if (!hydratedRef.current || captionSnapshot === savedSnapshotRef.current) return;
+    if (!hydratedRef.current || settingsSnapshot === savedSnapshotRef.current) return;
     setCaptionSaveState("saving");
     const timer = window.setTimeout(() => {
       void (async () => {
@@ -248,11 +420,18 @@ export function RenderPanel({
                     ? (base.export as Record<string, unknown>)
                     : {}),
                   compression: compressionBody,
+                  composition,
+                  face_cam_position: faceCamPosition,
+                  stack_split_pct: stackSplit,
+                  adaptive_stack: adaptiveStack,
+                  face_cam_overrides: faceCamOverrides,
+                  crop_x_pct: cropX,
+                  crop_y_pct: cropY,
                 },
               },
             },
           });
-          savedSnapshotRef.current = captionSnapshot;
+          savedSnapshotRef.current = settingsSnapshot;
           setCaptionSaveState("saved");
         } catch {
           setCaptionSaveState("error");
@@ -266,9 +445,16 @@ export function RenderPanel({
     captionPosition,
     captionPositionPct,
     captionPreset,
-    captionSnapshot,
     compressionBody,
+    composition,
+    cropX,
+    cropY,
+    faceCamPosition,
+    adaptiveStack,
+    faceCamOverrides,
     projectId,
+    settingsSnapshot,
+    stackSplit,
   ]);
 
   useEffect(() => {
@@ -294,7 +480,8 @@ export function RenderPanel({
     };
   }, [aspect, resolution, durationMs, compressionBody, projectId]);
 
-  function resetCaptionPosition() {    setCaptionPosition(DEFAULT_CAPTION_POSITION);
+  function resetCaptionPosition() {
+    setCaptionPosition(DEFAULT_CAPTION_POSITION);
     setCaptionPositionPct(DEFAULT_CAPTION_POSITION_PCT);
     setCaptionAlignment(DEFAULT_CAPTION_ALIGNMENT);
     setCaptionMarginV(DEFAULT_CAPTION_MARGIN_V);
@@ -313,6 +500,10 @@ export function RenderPanel({
         aspect,
         resolution,
         composition,
+        face_cam_position: faceCamPosition,
+        stack_split_pct: stackSplit,
+        adaptive_stack: adaptiveStack,
+        face_cam_overrides: faceCamOverrides,
         crop_x_pct: cropX,
         crop_y_pct: cropY,
         caption_preset: captionPreset,
@@ -446,13 +637,21 @@ export function RenderPanel({
         </div>
       </div>
 
-      <div className="grid gap-4 border-t border-white/6 pt-3 lg:grid-cols-[168px_1fr]">
+      <div className="grid gap-4 border-t border-white/6 pt-3 lg:grid-cols-[220px_1fr]">
         <CompositionPreview
+          projectId={projectId}
+          candidateId={candidateId}
           aspect={aspect}
+          resolution={resolution}
           mode={composition}
-          captionPosition={captionPosition}
-          captionPositionPct={captionPositionPct}
-          captionAlignment={captionAlignment}
+          faceCamPosition={faceCamPosition}
+          stackSplit={stackSplit}
+          adaptiveStack={adaptiveStack}
+          faceCamOverrides={faceCamOverrides}
+          cropX={cropX}
+          cropY={cropY}
+          enabled={captionSaveState !== "loading"}
+          onDetected={handleDetectedFacecam}
         />
         <div className="space-y-2">
           <p className="label">Layout preview</p>
@@ -461,6 +660,59 @@ export function RenderPanel({
               ? "Scene changes are detected before encoding. Slides, tables and screen recordings are contained; a centred speaker is cropped."
               : COMPOSITION_MODES.find((mode) => mode.id === composition)?.hint}
           </p>
+          {composition === "stack" ? (
+            <div className="space-y-2 rounded-md border border-white/8 bg-black/20 p-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="label">Face-cam position</p>
+                <div className="segmented" role="group" aria-label="Face-cam position">
+                  {FACE_CAM_POSITIONS.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      data-active={faceCamPosition === entry.id}
+                      aria-pressed={faceCamPosition === entry.id}
+                      onClick={() => setFaceCamPosition(entry.id)}
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="block space-y-1 text-[11px] text-mist-500">
+                <span className="flex justify-between">
+                  <span>Gameplay panel</span>
+                  <span className="numeric text-mist-300">{stackSplit}% of the frame</span>
+                </span>
+                <input
+                  type="range"
+                  min={40}
+                  max={75}
+                  step={5}
+                  value={stackSplit}
+                  onChange={(event) => setStackSplit(Number(event.target.value))}
+                  className="w-full accent-ember-500"
+                />
+                <span className="block text-[10.5px] leading-relaxed text-mist-600">
+                  The face-cam takes the rest. Captions stay inside the gameplay panel, never over the face-cam.
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-[11px] text-mist-400">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-3.5 accent-ember-500"
+                  checked={adaptiveStack}
+                  onChange={(event) => setAdaptiveStack(event.target.checked)}
+                />
+                <span>
+                  Let the split follow the face-cam size
+                  <span className="block text-[10.5px] leading-relaxed text-mist-600">
+                    Off by default: the panels stay fixed while the source crops follow the face-cam. On, the
+                    split shifts by up to 8 points per tracked range.
+                  </span>
+                </span>
+              </label>
+            </div>
+          ) : null}
           {composition === "crop" || composition === "manual" ? (
             <div className="grid gap-2 sm:grid-cols-2">
               <label className="space-y-1 text-[11px] text-mist-500">
@@ -493,8 +745,17 @@ export function RenderPanel({
               </label>
             </div>
           ) : null}
+          {composition === "stack" || composition === "facecam_focus" ? (
+            <FaceCamCorrectionEditor
+              overrides={faceCamOverrides}
+              onChange={setFaceCamOverrides}
+              durationMs={durationMs}
+              detected={detectedFacecam}
+            />
+          ) : null}
           <p className="text-[11px] text-mist-600">
-            Caption guides show the measured safe band, not a guess. The export gate records the real pixel width.
+            The preview is one real frame drawn by the export filters. Layout and face-cam choices are saved on
+            this project, so the next render and a reload use the same composition.
           </p>
         </div>
       </div>
@@ -840,117 +1101,433 @@ export function RenderPanel({
   );
 }
 
-function CompositionPreview({
-  aspect,
-  mode,
-  captionPosition,
-  captionPositionPct,
-  captionAlignment,
+function FaceCamCorrectionEditor({
+  overrides,
+  onChange,
+  durationMs,
+  detected,
 }: {
-  aspect: AspectId;
-  mode: CompositionModeId;
-  captionPosition: CaptionPositionId;
-  captionPositionPct: number;
-  captionAlignment: CaptionAlignmentId;
+  overrides: FaceCamOverrideDraft[];
+  onChange: (value: FaceCamOverrideDraft[]) => void;
+  durationMs: number;
+  detected: DetectedFacecam | null;
 }) {
-  const ratio = aspect === "9:16" ? "9 / 16" : aspect === "1:1" ? "1 / 1" : "16 / 9";
-  const contained = mode === "fit" || mode === "split";
-  const pip = mode === "pip";
-  const stack = mode === "stack";
-  const facecam = mode === "facecam_focus";
-  const bottomInset = aspect === "9:16" ? "18%" : "10%";
-  const customTop = `${Math.max(0, Math.min(88, captionPositionPct - 6))}%`;
-  const stackCaption =
-    captionPosition === "center"
-      ? { top: "28%", height: "12%" }
-      : captionPosition === "top"
-        ? { top: "8%", height: "12%" }
-        : captionPosition === "custom"
-          ? { top: `${Math.max(0, Math.min(46, captionPositionPct - 6))}%`, height: "12%" }
-          : { top: "46%", height: "12%" };
-  const horizontal =
-    captionAlignment === "left"
-      ? { left: "8%", right: "auto" }
-      : captionAlignment === "right"
-        ? { left: "auto", right: "8%" }
-        : { left: "10%", right: "10%" };
+  function update(index: number, patch: Partial<FaceCamOverrideDraft>) {
+    onChange(overrides.map((entry, position) => (position === index ? { ...entry, ...patch } : entry)));
+  }
+
+  function updateRect(index: number, patch: Partial<FaceCamRect>) {
+    const entry = overrides[index];
+    if (!entry) return;
+    update(index, { rect: { ...entry.rect, ...patch } });
+  }
+
+  function add() {
+    const start = 0;
+    const end = Math.max(start + 1_000, Math.min(5_000, Math.max(1_000, durationMs)));
+    onChange([
+      ...overrides,
+      {
+        start_ms: start,
+        end_ms: end,
+        rect: { x_pct: 0.66, y_pct: 0.62, width_pct: 0.3, height_pct: 0.34 },
+        mode: "lock",
+        reason: "Manual webcam region",
+      },
+    ]);
+  }
+
+  function addDetected() {
+    if (!detected) return;
+    const start = Math.max(0, detected.start_ms);
+    const end = Math.max(start + 1_000, detected.end_ms);
+    onChange([
+      ...overrides,
+      {
+        start_ms: start,
+        end_ms: end,
+        rect: detected.rect,
+        mode: "lock",
+        reason: `Detected webcam panel (${detected.state ?? "detected"})`,
+      },
+    ]);
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-white/8 bg-black/20 p-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="label">Webcam region corrections</p>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="text-[11px] text-ember-300 hover:text-ember-200 disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={addDetected}
+            disabled={!detected}
+            title={detected ? "Create a locked correction from the detected panel" : "No detected panel to copy yet"}
+          >
+            Use detected region
+          </button>
+          <button type="button" className="text-[11px] text-ember-300 hover:text-ember-200" onClick={add}>
+            Add correction
+          </button>
+        </div>
+      </div>
+      <p className="text-[10.5px] leading-relaxed text-mist-600">
+        Corrections use source-frame percentages and source time. Locked region keeps the rectangle for the
+        whole span; Track from region uses it as the starting rectangle and only allows a sustained, visible
+        panel move. Both survive reload, preview and export.
+      </p>
+      {overrides.length === 0 ? (
+        <p className="text-[10.5px] text-mist-600">
+          Automatic webcam-panel tracking is used as-is. Add a correction when a game character is mistaken for
+          the webcam, when the panel is missed, or when the panel genuinely moves.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {overrides.map((entry, index) => (
+            <div key={`${entry.start_ms}-${index}`} className="space-y-1.5 rounded border border-white/8 p-2">
+              <div className="grid grid-cols-2 gap-1.5">
+                <label className="space-y-0.5 text-[10px] text-mist-500">
+                  <span>Start (s)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={(entry.start_ms / 1000).toFixed(1)}
+                    onChange={(event) => {
+                      const start = Math.max(0, Math.round(Number(event.target.value) * 1000));
+                      update(index, { start_ms: start, end_ms: Math.max(start + 1000, entry.end_ms) });
+                    }}
+                    className="field h-7 w-full text-[11px]"
+                  />
+                </label>
+                <label className="space-y-0.5 text-[10px] text-mist-500">
+                  <span>End (s)</span>
+                  <input
+                    type="number"
+                    min={0.1}
+                    step={0.1}
+                    value={(entry.end_ms / 1000).toFixed(1)}
+                    onChange={(event) => {
+                      const end = Math.max(entry.start_ms + 1000, Math.round(Number(event.target.value) * 1000));
+                      update(index, { end_ms: end });
+                    }}
+                    className="field h-7 w-full text-[11px]"
+                  />
+                </label>
+              </div>
+              <div className="grid grid-cols-4 gap-1.5">
+                {(
+                  [
+                    ["X", "x_pct"],
+                    ["Y", "y_pct"],
+                    ["W", "width_pct"],
+                    ["H", "height_pct"],
+                  ] as const
+                ).map(([label, key]) => (
+                  <label key={key} className="space-y-0.5 text-[10px] text-mist-500">
+                    <span>{label} %</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={Math.round(entry.rect[key] * 100)}
+                      onChange={(event) => {
+                        const raw = Math.min(100, Math.max(0, Number(event.target.value)));
+                        updateRect(index, { [key]: raw / 100 });
+                      }}
+                      className="field h-7 w-full text-[11px]"
+                    />
+                  </label>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <label className="space-y-0.5 text-[10px] text-mist-500">
+                  <span>Region mode</span>
+                  <select
+                    className="field h-7 w-full text-[11px]"
+                    value={entry.mode}
+                    onChange={(event) =>
+                      update(index, { mode: event.target.value === "track" ? "track" : "lock" })
+                    }
+                  >
+                    <option value="lock">Locked region</option>
+                    <option value="track">Track from region</option>
+                  </select>
+                </label>
+                <p className="self-end pb-1 text-[10px] leading-tight text-mist-600">
+                  {entry.mode === "lock"
+                    ? "Uses this rectangle for the whole span."
+                    : "Seeds tracking; genuine panel moves may update it."}
+                </p>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  type="text"
+                  value={entry.reason}
+                  maxLength={200}
+                  onChange={(event) => update(index, { reason: event.target.value })}
+                  className="field h-7 min-w-0 flex-1 text-[11px]"
+                  aria-label="Correction reason"
+                />
+                <button
+                  type="button"
+                  className="text-[10.5px] text-signal-bad/90 hover:text-signal-bad"
+                  onClick={() => onChange(overrides.filter((_, position) => position !== index))}
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompositionPreview({
+  projectId,
+  candidateId,
+  aspect,
+  resolution,
+  mode,
+  faceCamPosition,
+  stackSplit,
+  adaptiveStack,
+  faceCamOverrides,
+  cropX,
+  cropY,
+  enabled,
+  onDetected,
+}: {
+  projectId: string;
+  candidateId: string;
+  aspect: AspectId;
+  resolution: 720 | 1080;
+  mode: CompositionModeId;
+  faceCamPosition: FaceCamPositionId;
+  stackSplit: number;
+  adaptiveStack: boolean;
+  faceCamOverrides: FaceCamOverrideDraft[];
+  cropX: number;
+  cropY: number;
+  enabled: boolean;
+  onDetected: (value: DetectedFacecam | null) => void;
+}) {
+  const [preview, setPreview] = useState<CompositionPreviewResponse | null>(null);
+  const [status, setStatus] = useState<"loading" | "refreshing" | "ready" | "error">("loading");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setStatus((current) => (current === "ready" || current === "refreshing" ? "refreshing" : "loading"));
+      setError(null);
+      apiJson<CompositionPreviewResponse>(
+        `/api/projects/${projectId}/renders/composition-preview`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: {
+            candidate_id: candidateId,
+            aspect,
+            resolution,
+            composition: mode,
+            face_cam_position: faceCamPosition,
+            stack_split_pct: stackSplit,
+            adaptive_stack: adaptiveStack,
+            face_cam_overrides: faceCamOverrides,
+            crop_x_pct: cropX,
+            crop_y_pct: cropY,
+            captions_enabled: false,
+          },
+        },
+      )
+        .then((value) => {
+          if (cancelled) return;
+          setPreview(value);
+          setStatus("ready");
+          const rect = value.facecam.rect;
+          onDetected(
+            rect &&
+              typeof rect.x_pct === "number" &&
+              typeof rect.y_pct === "number" &&
+              typeof rect.width_pct === "number" &&
+              typeof rect.height_pct === "number"
+              ? {
+                  rect: {
+                    x_pct: rect.x_pct,
+                    y_pct: rect.y_pct,
+                    width_pct: rect.width_pct,
+                    height_pct: rect.height_pct,
+                  },
+                  state: value.facecam.state ?? null,
+                  confidence: value.facecam.confidence ?? null,
+                  start_ms: value.segment.start_ms,
+                  end_ms: value.segment.end_ms,
+                }
+              : null,
+          );
+        })
+        .catch((caught: unknown) => {
+          if (cancelled || controller.signal.aborted) return;
+          setStatus("error");
+          setError(caught instanceof Error ? caught.message : "The preview frame could not be rendered.");
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [
+    aspect,
+    candidateId,
+    cropX,
+    cropY,
+    enabled,
+    faceCamPosition,
+    adaptiveStack,
+    faceCamOverrides,
+    mode,
+    onDetected,
+    projectId,
+    resolution,
+    stackSplit,
+  ]);
+
+  const ratio =
+    preview !== null
+      ? `${preview.width} / ${preview.height}`
+      : aspect === "9:16"
+        ? "9 / 16"
+        : aspect === "1:1"
+          ? "1 / 1"
+          : "16 / 9";
+  const band = preview?.decision?.caption_band ?? null;
+  const requestedMode = mode;
+  const renderedMode = preview?.decision?.mode ?? null;
+  const busy = status === "loading" || status === "refreshing";
+
   return (
     <div className="space-y-1.5">
       <div
-        className="relative overflow-hidden rounded-lg border border-white/10"
-        style={{ aspectRatio: ratio, background: "linear-gradient(145deg,#171b22,#0b0d11)" }}
-        aria-label={`Layout preview: ${mode}`}
-        role="img"
+        className="relative overflow-hidden rounded-lg border border-white/10 bg-ink-950"
+        style={{ aspectRatio: ratio }}
+        aria-label={`Layout preview: ${requestedMode}`}
+        aria-busy={busy}
       >
-        {stack ? (
-          <>
-            <div className="absolute inset-x-0 top-0 h-[60%] border-b border-white/20 bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.18),transparent_65%)]">
-              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-400">
-                gameplay
-              </span>
-            </div>
-            <div className="absolute inset-x-0 bottom-0 h-[40%] bg-[radial-gradient(circle_at_50%_40%,rgba(255,209,102,0.16),transparent_65%)]">
-              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-400">
-                face-cam
-              </span>
-            </div>
-          </>
-        ) : facecam ? (
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(255,255,255,0.16),transparent_65%)]">
-            <div className="absolute left-[28%] right-[28%] top-[24%] bottom-[24%] rounded-sm border border-dashed border-signal-info/60 bg-signal-info/[0.06]">
-              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-400">
-                face-cam
-              </span>
-            </div>
-          </div>
-        ) : contained || pip ? (
-          <>
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.14),transparent_60%)] opacity-50 blur-sm" />
-            <div
-              className="absolute rounded-sm border border-white/15 bg-white/[0.06]"
-              style={
-                pip
-                  ? { left: "14%", right: "14%", top: "26%", height: "38%" }
-                  : { left: 0, right: 0, top: "34%", height: "32%" }
-              }
-            >
-              <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-500">
-                source
-              </span>
-            </div>
-          </>
+        {preview ? (
+          // The frame comes from the same FFmpeg chain as the export, so it is
+          // evidence of the composition rather than a diagram of the intent.
+          <img
+            src={preview.image}
+            alt={`Rendered ${renderedMode ?? requestedMode} frame at ${formatTimecode(preview.segment.start_ms)}`}
+            className="absolute inset-0 size-full object-contain"
+          />
         ) : (
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(255,255,255,0.16),transparent_65%)]">
-            <span className="absolute inset-0 grid place-items-center text-[9px] uppercase tracking-[0.18em] text-mist-600">
-              filled
+          <div className="absolute inset-0 bg-[linear-gradient(145deg,#171b22,#0b0d11)]" />
+        )}
+
+        {band ? (
+          <div
+            className="pointer-events-none absolute border-y border-dashed border-ember-500/50 bg-ember-500/[0.07]"
+            style={{
+              left: "7%",
+              right: "7%",
+              top: `${band.top_pct * 100}%`,
+              height: `${Math.max(4, (band.bottom_pct - band.top_pct) * 100)}%`,
+            }}
+          >
+            <span className="absolute inset-0 grid place-items-center text-[8px] uppercase tracking-[0.2em] text-ember-300/80">
+              caption band
             </span>
           </div>
-        )}
-        <div
-          className="absolute inset-x-0 border-y border-dashed border-ember-500/40 bg-ember-500/[0.06]"
-          style={
-            stack
-              ? { ...horizontal, ...stackCaption }
-              : captionPosition === "center"
-                ? { ...horizontal, top: "44%", height: "12%" }
-                : captionPosition === "top"
-                  ? { ...horizontal, top: "8%", height: "12%" }
-                  : captionPosition === "custom"
-                    ? { ...horizontal, top: customTop, height: "12%" }
-                    : { ...horizontal, bottom: bottomInset, height: "12%" }
-          }
-        >
-          <span className="absolute inset-0 grid place-items-center text-[8px] uppercase tracking-[0.2em] text-ember-300/80">
-            captions
+        ) : null}
+
+        {busy ? (
+          <div className="absolute inset-0 grid place-items-center bg-black/45 text-center">
+            <span className="flex items-center gap-1.5 rounded bg-black/60 px-2 py-1 text-[10px] text-mist-300">
+              <Loader2 className="size-3 animate-spin" strokeWidth={2} />
+              {preview ? "Updating frame" : "Rendering a real frame"}
+            </span>
+          </div>
+        ) : null}
+
+        {preview ? (
+          <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1 py-0.5 text-[8.5px] uppercase tracking-wide text-mist-300">
+            {renderedMode ?? requestedMode}
           </span>
-        </div>
-        <span className="absolute left-1.5 top-1.5 rounded bg-black/55 px-1 py-0.5 text-[8.5px] uppercase tracking-wide text-mist-400">
-          {mode}
-        </span>
+        ) : null}
+        {preview?.fallback ? (
+          <span className="absolute right-1.5 top-1.5 rounded bg-ember-500/20 px-1 py-0.5 text-[8.5px] uppercase tracking-wide text-ember-200">
+            fallback
+          </span>
+        ) : null}
       </div>
-      <p className="text-[10px] leading-snug text-mist-600">
-        Schematic. The worker stores the real scene plan in the render spec.
+
+      <p
+        aria-live="polite"
+        className={cn(
+          "text-[10px] leading-snug",
+          status === "error" ? "text-signal-bad/90" : "text-mist-600",
+        )}
+      >
+        {status === "error"
+          ? error
+          : preview
+            ? `${preview.width}×${preview.height} · source ${formatTimecode(preview.segment.start_ms)}–${formatTimecode(preview.segment.end_ms)} · ${
+                preview.facecam.detected
+                  ? `webcam panel ${preview.facecam.state ?? "detected"}${
+                      typeof preview.facecam.confidence === "number"
+                        ? ` (${Math.round(preview.facecam.confidence * 100)}% confidence)`
+                        : ""
+                    }`
+                  : "no webcam panel detected"
+              }`
+            : "Waiting for the project settings before rendering a frame."}
       </p>
+
+      {preview?.facecam.detector_available === false ? (
+        <p className="text-[10px] leading-snug text-ember-300/90">
+          Webcam detection is unavailable in this worker. Set a manual region before exporting.
+        </p>
+      ) : null}
+
+      {preview?.facecam.review_required ? (
+        <p className="text-[10px] leading-snug text-ember-300/90">
+          Review this interval: the webcam panel is uncertain
+          {preview.facecam.reason ? ` — ${preview.facecam.reason}` : ""}. Lock a region in the correction
+          editor before exporting.
+        </p>
+      ) : null}
+
+      {preview?.facecam.ranges?.length ? (
+        <p className="text-[10px] leading-snug text-mist-600">
+          {preview.facecam.ranges.length} tracked range
+          {preview.facecam.ranges.length === 1 ? "" : "s"}:{" "}
+          {preview.facecam.ranges
+            .slice(0, 3)
+            .map(
+              (range) =>
+                `${formatTimecode(range.start_ms)}–${formatTimecode(range.end_ms)} ${range.state}`,
+            )
+            .join(" · ")}
+          {preview.facecam.ranges.length > 3 ? " · …" : ""}
+        </p>
+      ) : null}
+
+      {preview?.fallback ? (
+        <p className="text-[10px] leading-snug text-ember-300/90">
+          {requestedMode} could not be drawn for this source
+          {renderedMode ? `, so the encoder fell back to ${renderedMode}` : ""}.
+          {preview.warnings[0] ? ` ${preview.warnings[0]}` : ""}
+        </p>
+      ) : null}
     </div>
   );
 }

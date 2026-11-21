@@ -16,6 +16,7 @@ dependencies = [
   "faster-whisper>=1.1,<2.0",
   "yt-dlp>=2024.10",
   "Pillow>=10.4,<13.0",
+  "onnxruntime>=1.20,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +32,15 @@ where = ["src"]
 [tool.setuptools.package-data]
 # schema.sql is read at startup; without this it exists in the source tree and
 # editable installs but not in the wheel used by the container image.
-clipforge = ["db/*.sql", "rendering/fonts/*.ttf", "rendering/fonts/*.otf", "rendering/fonts/*.md", "rendering/fonts/*.txt"]
+clipforge = [
+  "db/*.sql",
+  "rendering/fonts/*.ttf",
+  "rendering/fonts/*.otf",
+  "rendering/fonts/*.md",
+  "rendering/fonts/*.txt",
+  "media/models/*.onnx",
+  "media/models/*.txt",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

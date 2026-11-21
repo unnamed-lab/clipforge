@@ -250,12 +250,20 @@ export const COMPOSITION_MODES = [
   { id: "fit", label: "Contain", hint: "Show the whole source over a neutral fill" },
   { id: "pip", label: "Picture in picture", hint: "Full source over a blurred background" },
   { id: "split", label: "Split / stacked", hint: "Unavailable for a single source" },
-  { id: "stack", label: "Stack gameplay + face-cam", hint: "Gameplay on top, detected face-cam below" },
+  { id: "stack", label: "Stack gameplay + face-cam", hint: "Gameplay and detected face-cam in two panels" },
   { id: "facecam_focus", label: "Face-cam focus", hint: "Zoom to a detected face-cam region" },
   { id: "manual", label: "Manual", hint: "Per-scene overrides in the editor" },
 ] as const;
 
 export type CompositionModeId = (typeof COMPOSITION_MODES)[number]["id"];
+
+export const FACE_CAM_POSITIONS = [
+  { id: "bottom", label: "Face-cam below", hint: "Gameplay on top, face-cam panel underneath" },
+  { id: "top", label: "Face-cam above", hint: "Face-cam panel on top, gameplay underneath" },
+] as const;
+
+export type FaceCamPositionId = (typeof FACE_CAM_POSITIONS)[number]["id"];
+export const DEFAULT_FACE_CAM_POSITION: FaceCamPositionId = "bottom";
 
 /** Named gaming layouts. Each maps to a composition the renderer can honour. */
 export const GAMING_PRESETS = [
@@ -291,7 +299,7 @@ export const GAMING_PRESETS = [
     id: "gameplay_facecam",
     label: "Gameplay + face-cam stack",
     composition: "stack",
-    description: "Gameplay on top, the detected face-cam in a panel below.",
+    description: "Gameplay and the detected face-cam in two stacked panels.",
     warns: "Falls back to a full crop with a warning when no face-cam is detected.",
   },
 ] as const;

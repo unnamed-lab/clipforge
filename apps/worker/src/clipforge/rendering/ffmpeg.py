@@ -76,6 +76,7 @@ def _composition_chain(
     target_aspect: float,
     input_label: str,
     output_label: str,
+    fps: int = 30,
 ) -> str:
     uid = output_label
     mode = decision.mode
@@ -93,22 +94,65 @@ def _composition_chain(
     if mode == "stack":
         face = decision.facecam
         assert face is not None  # guarded above
-        game_height = max(2, min(height - 2, _even(height * 0.60)))
-        cam_height = max(2, height - game_height)
-        fx = max(0.0, min(1.0, face.x_pct))
-        fy = max(0.0, min(1.0, face.y_pct))
-        fw = max(0.01, min(1.0 - fx, face.width_pct))
-        fh = max(0.01, min(1.0 - fy, face.height_pct))
+        split_pct = max(35.0, min(80.0, decision.stack_split_pct))
+        game_height = _even(height * split_pct / 100.0)
+        game_height = max(2, min(height - 2, game_height))
+        if game_height % 2:
+            game_height -= 1
+        cam_height = height - game_height
+        pad_colour = decision.background_color.replace("#", "0x")
+
+        game = decision.gameplay_rect
+        if game is not None:
+            gx = max(0.0, min(1.0, game.x_pct))
+            gy = max(0.0, min(1.0, game.y_pct))
+            gw = max(0.01, min(1.0 - gx, game.width_pct))
+            gh = max(0.01, min(1.0 - gy, game.height_pct))
+            game_chain = (
+                f"[gamesrc_{uid}]crop=iw*{gw:.4f}:ih*{gh:.4f}:iw*{gx:.4f}:ih*{gy:.4f},"
+                f"scale={width}:{game_height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{game_height},setsar=1[game_{uid}]"
+            )
+        else:
+            game_chain = (
+                f"[gamesrc_{uid}]scale={width}:{game_height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{game_height}:(iw-ow)*0.5:(ih-oh)*0.5,setsar=1[game_{uid}]"
+            )
+
+        panel = decision.facecam_panel_rect
+        if panel is not None:
+            px = max(0.0, min(1.0, panel.x_pct))
+            py = max(0.0, min(1.0, panel.y_pct))
+            pw = max(0.01, min(1.0 - px, panel.width_pct))
+            ph = max(0.01, min(1.0 - py, panel.height_pct))
+            cam_chain = (
+                f"[camsrc_{uid}]crop=iw*{pw:.4f}:ih*{ph:.4f}:iw*{px:.4f}:ih*{py:.4f},"
+                f"scale={width}:{cam_height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{cam_height},setsar=1[cam_{uid}]"
+            )
+        else:
+            fx = max(0.0, min(1.0, face.x_pct))
+            fy = max(0.0, min(1.0, face.y_pct))
+            fw = max(0.01, min(1.0 - fx, face.width_pct))
+            fh = max(0.01, min(1.0 - fy, face.height_pct))
+            cam_chain = (
+                f"[camsrc_{uid}]crop=iw*{fw:.4f}:ih*{fh:.4f}:iw*{fx:.4f}:ih*{fy:.4f},"
+                f"scale={width}:{cam_height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{cam_height}:(ow-iw)/2:(oh-ih)/2:color={pad_colour},setsar=1[cam_{uid}]"
+            )
+
+        # Two full-width panels stacked to exactly the output height. vstack
+        # keeps the source frame rate; a synthetic colour source would cap it.
+        panels = (
+            f"[game_{uid}][cam_{uid}]"
+            if decision.face_cam_position == "bottom"
+            else f"[cam_{uid}][game_{uid}]"
+        )
         chain = (
             f"{input_label}split=2[gamesrc_{uid}][camsrc_{uid}];"
-            f"[gamesrc_{uid}]scale={width}:{game_height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{game_height}:(iw-ow)*0.5:(ih-oh)*0.5,setsar=1[game_{uid}];"
-            f"[camsrc_{uid}]crop=iw*{fw:.4f}:ih*{fh:.4f}:iw*{fx:.4f}:ih*{fy:.4f},"
-            f"scale={width}:{cam_height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{cam_height}:(iw-ow)*0.5:(ih-oh)*0.5,setsar=1[cam_{uid}];"
-            f"color=c={decision.background_color}:s={width}x{height}:r=30[bg_{uid}];"
-            f"[bg_{uid}][game_{uid}]overlay=0:0:shortest=1[stacked_{uid}];"
-            f"[stacked_{uid}][cam_{uid}]overlay=0:{game_height}:shortest=1[composed_{uid}];"
+            f"{game_chain};"
+            f"{cam_chain};"
+            f"{panels}vstack=inputs=2[composed_{uid}];"
             f"[composed_{uid}]setsar=1"
         )
         return chain + f"[{output_label}]"
@@ -166,7 +210,7 @@ def _composition_chain(
     if decision.background in {"solid", "none"}:
         background_color = decision.background_color if decision.background == "solid" else "#000000"
         chain = (
-            f"color=c={background_color}:s={width}x{height}:r=30[bg_{uid}];"
+            f"color=c={background_color}:s={width}x{height}:r={fps}[bg_{uid}];"
             f"{input_label}{source_crop}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
             f"setsar=1[fg_{uid}];"
             f"[bg_{uid}][fg_{uid}]overlay={x}:{y}:shortest=1[composed_{uid}];"
@@ -188,7 +232,8 @@ def _composition_chain(
 
 
 def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
-                   output_label: str, segment: SegmentSpan, source_aspect: float) -> str:
+                   output_label: str, segment: SegmentSpan, source_aspect: float,
+                   fps: int = 30) -> str:
     if segment.composition is not None:
         return _composition_chain(
             segment.composition,
@@ -198,6 +243,7 @@ def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
             target_aspect=width / height,
             input_label=input_label,
             output_label=output_label,
+            fps=fps,
         )
     if spec.video.framing == "blur":
         uid = output_label
@@ -357,7 +403,7 @@ def build_command(
     for index, segment in enumerate(spec.segments):
         filters.append(
             _framing_chain(
-                spec, width, height, f"[{index}:v]", f"v{index}", segment, source_aspect
+                spec, width, height, f"[{index}:v]", f"v{index}", segment, source_aspect, fps=fps
             )
         )
         video_inputs.append(f"[v{index}]")
@@ -398,6 +444,43 @@ def build_command(
     ]
 
     return RenderCommand(args=args, cwd=cwd, output_name=output_name, expected_duration_ms=total_ms)
+
+
+def build_preview_command(
+    spec: RenderSpec,
+    *,
+    segment: SegmentSpan,
+    source: Path,
+    cwd: Path,
+    at_ms: int | None = None,
+    output_name: str = "preview.jpg",
+    source_width: int | None = None,
+    source_height: int | None = None,
+) -> RenderCommand:
+    """Render one real frame through the exact composition chain used to export.
+
+    The preview is not a second renderer: it shares ``_framing_chain`` with the
+    export, so a layout that appears here is the layout FFmpeg will encode.
+    """
+
+    ffmpeg = require("ffmpeg")
+    width, height = spec.output_dimensions
+    source_aspect = (source_width or 1920) / max(1, source_height or 1080)
+    midpoint = segment.start_ms + segment.duration_ms // 2
+    at = midpoint if at_ms is None else at_ms
+    at = max(segment.start_ms, min(max(segment.start_ms, segment.end_ms - 1), int(at)))
+    chain = _framing_chain(
+        spec, width, height, "[0:v]", "vpreview", segment, source_aspect, fps=30
+    )
+    filters = f"{chain};[vpreview]format=yuvj420p[preview]"
+    args: list[str] = [
+        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", _seconds(at), "-i", str(source),
+        "-filter_complex", filters,
+        "-map", "[preview]", "-frames:v", "1", "-q:v", "3",
+        output_name,
+    ]
+    return RenderCommand(args=args, cwd=cwd, output_name=output_name, expected_duration_ms=segment.duration_ms)
 
 
 @dataclass

@@ -1144,6 +1144,33 @@ export const renderRequestSchema = z.object({
   composition_overrides: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   crop_x_pct: z.number().min(0).max(100).optional(),
   crop_y_pct: z.number().min(0).max(100).optional(),
+  face_cam_position: z.enum(["top", "bottom"]).default("bottom"),
+  face_cam_rect: z
+    .object({
+      x_pct: z.number().min(0).max(1),
+      y_pct: z.number().min(0).max(1),
+      width_pct: z.number().gt(0).max(1),
+      height_pct: z.number().gt(0).max(1),
+    })
+    .optional(),
+  face_cam_overrides: z
+    .array(
+      z.object({
+        start_ms: z.number().min(0),
+        end_ms: z.number().gt(0),
+        rect: z.object({
+          x_pct: z.number().min(0).max(1),
+          y_pct: z.number().min(0).max(1),
+          width_pct: z.number().gt(0).max(1),
+          height_pct: z.number().gt(0).max(1),
+        }),
+        mode: z.enum(["lock", "track"]).default("lock"),
+        reason: z.string().max(200).optional(),
+      }),
+    )
+    .optional(),
+  stack_split_pct: z.number().min(35).max(80).default(60),
+  adaptive_stack: z.boolean().default(false),
   caption_preset: z.enum(["clean", "large", "minimal", "branded", "custom"]),
   captions_enabled: z.boolean(),
   captions: z

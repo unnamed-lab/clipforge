@@ -153,6 +153,82 @@ class CaptionSettings(BaseModel):
         return self
 
 
+class Rect(BaseModel):
+    """Normalised rectangle in output space (0-1, origin top-left)."""
+
+    x_pct: float = Field(default=0.0, ge=0.0, le=1.0)
+    y_pct: float = Field(default=0.0, ge=0.0, le=1.0)
+    width_pct: float = Field(default=1.0, gt=0.0, le=1.0)
+    height_pct: float = Field(default=1.0, gt=0.0, le=1.0)
+
+
+FaceCamState = Literal["visible", "missing", "uncertain", "manual"]
+
+
+class FaceCamOverride(BaseModel):
+    """A user correction that wins for one source time range.
+
+    ``lock`` holds the confirmed rectangle for the whole range. ``track`` uses
+    it as a seed and still allows a genuine, persistent panel move inside the
+    range. Both ignore unrelated faces outside the region for webcam identity.
+    """
+
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    rect: Rect
+    mode: Literal["lock", "track"] = "lock"
+    reason: str = Field(default="Manual face-cam region", max_length=200)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "FaceCamOverride":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("Face-cam override end must be after its start")
+        return self
+
+
+class FaceCamObservation(BaseModel):
+    """One time-indexed face-cam reading from the visual sampler."""
+
+    time_ms: int = Field(ge=0)
+    state: FaceCamState = "missing"
+    rect: Rect | None = None
+    face_rect: Rect | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+
+class FaceCamRange(BaseModel):
+    """A stable face-cam state held across a source time range."""
+
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    state: FaceCamState = "missing"
+    rect: Rect | None = None
+    face_rect: Rect | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "FaceCamRange":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("Face-cam range end must be after its start")
+        return self
+
+
+class FaceCamTrack(BaseModel):
+    """Canonical, time-indexed face-cam tracking result.
+
+    ``observations`` are the sampled evidence after smoothing; ``ranges`` are
+    the stable states the composition planner attaches to output segments.
+    """
+
+    observations: list[FaceCamObservation] = Field(default_factory=list)
+    ranges: list[FaceCamRange] = Field(default_factory=list)
+    analysis_height: int | None = None
+    sample_fps: float | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class VideoSettings(BaseModel):
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
     resolution: Literal[720, 1080] = 1080
@@ -163,6 +239,19 @@ class VideoSettings(BaseModel):
     crop_x_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     crop_y_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     fps: int | None = Field(default=None, ge=15, le=60)
+    # Stacked gameplay layouts: which panel the detected face-cam occupies and
+    # how much of the output height the gameplay panel keeps. ``face_cam_rect``
+    # is an optional manual override for detection; both values are part of the
+    # render spec so preview, API and encoder cannot disagree.
+    face_cam_position: Literal["top", "bottom"] = "bottom"
+    face_cam_rect: Rect | None = None
+    stack_split_pct: float = Field(default=60.0, ge=35.0, le=80.0)
+    # Time-ranged corrections win over tracking for their span. The whole-window
+    # ``face_cam_rect`` above remains the simple "this is the region" override.
+    face_cam_overrides: list[FaceCamOverride] = Field(default_factory=list)
+    # Stable panels are the default. Adaptive panels deliberately change the
+    # split at tracked face-cam size changes; they are opt-in.
+    adaptive_stack: bool = False
 
     @property
     def dimensions(self) -> tuple[int, int]:
@@ -216,15 +305,6 @@ class LogoOverlay(BaseModel):
         return self
 
 
-class Rect(BaseModel):
-    """Normalised rectangle in output space (0-1, origin top-left)."""
-
-    x_pct: float = Field(default=0.0, ge=0.0, le=1.0)
-    y_pct: float = Field(default=0.0, ge=0.0, le=1.0)
-    width_pct: float = Field(default=1.0, gt=0.0, le=1.0)
-    height_pct: float = Field(default=1.0, gt=0.0, le=1.0)
-
-
 class CaptionBand(BaseModel):
     """Vertical band captions may occupy, in output space (0-1)."""
 
@@ -257,12 +337,22 @@ class CompositionDecision(BaseModel):
     # Detected face-cam region in source space (normalised). Stack mode uses it
     # for its lower panel; face-cam focus uses it as a source crop.
     facecam: Rect | None = None
+    facecam_state: FaceCamState = "visible"
+    # Panel-specific source crops. They are computed from the panel aspect, not
+    # from the output aspect, so a short gameplay panel does not inherit 16:9.
+    gameplay_rect: Rect | None = None
+    facecam_panel_rect: Rect | None = None
+    protected_regions: list[Rect] = Field(default_factory=list)
     # Conservative crop of empty source margins before a contained layout.
     source_rect: Rect | None = None
     # Picture-in-picture keeps the whole source visible over a blurred fill.
     pip_scale_pct: float = Field(default=72.0, ge=30.0, le=100.0)
     pip_position: Literal["center", "top", "bottom"] = "center"
     pip_margin_px: int = Field(default=48, ge=0, le=300)
+    # Stacked layout geometry. ``stack_split_pct`` is the share of the output
+    # height kept by the gameplay panel; the face-cam takes the remainder.
+    face_cam_position: Literal["top", "bottom"] = "bottom"
+    stack_split_pct: float = Field(default=60.0, ge=35.0, le=80.0)
     caption_band: CaptionBand = Field(default_factory=CaptionBand)
     warnings: list[str] = Field(default_factory=list)
 
@@ -314,6 +404,8 @@ class RenderSpec(BaseModel):
     profile: ProfileRef = Field(default_factory=ProfileRef)
     profile_snapshot: dict = Field(default_factory=dict)
     edit_spec_id: str | None = None
+    # Time-indexed evidence and stable ranges behind the face-cam decisions.
+    facecam_track: FaceCamTrack | None = None
 
     @property
     def total_duration_ms(self) -> int:
@@ -376,6 +468,7 @@ class RenderSpec(BaseModel):
                 "codec": self.encode.codec,
             },
             "segments": segments,
+            "facecam_track": self.facecam_track.model_dump() if self.facecam_track else None,
             "total_output_ms": cursor,
         }
 
@@ -428,6 +521,11 @@ def build_spec(
     compression: EncodeSettings | dict | None = None,
     crop_x_pct: float | None = None,
     crop_y_pct: float | None = None,
+    face_cam_position: str = "bottom",
+    face_cam_rect: dict | None = None,
+    stack_split_pct: float = 60.0,
+    face_cam_overrides: list[dict] | None = None,
+    adaptive_stack: bool = False,
     caption_preset: str = DEFAULT_CAPTION_PRESET,
     captions_enabled: bool = True,
     caption_overrides: dict | None = None,
@@ -458,6 +556,11 @@ def build_spec(
             "crop_x_pct": crop_x_pct,
             "crop_y_pct": crop_y_pct,
             "fps": fps,
+            "face_cam_position": face_cam_position,
+            "face_cam_rect": face_cam_rect,
+            "stack_split_pct": stack_split_pct,
+            "face_cam_overrides": face_cam_overrides or [],
+            "adaptive_stack": adaptive_stack,
         },
         "encode": (
             compression.model_dump()

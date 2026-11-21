@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from clipforge.discovery.criteria import DiscoveryCriteria
-from clipforge.rendering.spec import DEFAULT_CAPTION_PRESET, CaptionSettings
+from clipforge.rendering.spec import DEFAULT_CAPTION_PRESET, CaptionSettings, FaceCamOverride, Rect
 
 
 class ProjectCreate(BaseModel):
@@ -168,6 +168,11 @@ class RenderRequest(BaseModel):
     composition_overrides: dict[str, dict] | None = None
     crop_x_pct: float | None = Field(default=None, ge=0, le=100)
     crop_y_pct: float | None = Field(default=None, ge=0, le=100)
+    face_cam_position: Literal["top", "bottom"] = "bottom"
+    face_cam_rect: Rect | None = None
+    face_cam_overrides: list[FaceCamOverride] = Field(default_factory=list)
+    stack_split_pct: float = Field(default=60.0, ge=35.0, le=80.0)
+    adaptive_stack: bool = False
     caption_preset: Literal["clean", "large", "minimal", "branded", "custom"] = DEFAULT_CAPTION_PRESET
     captions_enabled: bool = True
     captions: CaptionSettings | None = None
@@ -192,6 +197,12 @@ class RenderRequest(BaseModel):
         if not self.candidate_id and not self.segments:
             raise ValueError("Provide a candidate or explicit segments to render")
         return self
+
+
+class CompositionPreviewRequest(RenderRequest):
+    """A single real frame for the current composition settings."""
+
+    preview_at_ms: int | None = Field(default=None, ge=0)
 
 
 class RenderEstimateRequest(BaseModel):
