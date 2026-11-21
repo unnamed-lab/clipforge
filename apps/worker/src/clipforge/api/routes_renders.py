@@ -3,27 +3,41 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import shutil
+import subprocess
+import time
 import uuid
 from pathlib import Path
 
+import numpy as np
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 
 from clipforge.api.deps import get_state
 from clipforge.api.models import CompositionPreviewRequest, RenderEstimateRequest, RenderRequest
+from clipforge.enhancement.engines import ModelUnavailable, engine_for, load_benchmark
+from clipforge.enhancement.service import apply_frame, plan_is_available, resolve_plan
+from clipforge.enhancement.settings import denoise_filter
 from clipforge.errors import Conflict, NotFound, ValidationFailed
 from clipforge.media.assets import visual_input
+from clipforge.media.process import require
 from clipforge.profiles.spec import profile_snapshot, resolve_settings
 from clipforge.rendering.composition import expand_composition
 from clipforge.rendering.encode import EncodeSettings, resolve_encode
-from clipforge.rendering.ffmpeg import build_preview_command, execute
+from clipforge.rendering.ffmpeg import (
+    build_image_preview_command,
+    build_preview_command,
+    execute,
+)
 from clipforge.rendering.spec import (
     ASPECT_DIMENSIONS,
     DEFAULT_CAPTION_PRESET,
     CompositionDecision,
     RenderSpec,
     build_spec,
+    normalise_target,
 )
 from clipforge.security.paths import display_name
 from clipforge.storage.base import StorageObjectMissing, ensure_local
@@ -277,6 +291,23 @@ def _layout_payload(settings: dict, payload: RenderRequest) -> dict:
             payload.resolution if "resolution" in explicit
             else int(export.get("resolution", payload.resolution))
         ),
+        "resolution_mode": (
+            payload.resolution_mode if "resolution_mode" in explicit
+            else export.get("resolution_mode", "class")
+        ),
+        "custom_width": (
+            payload.custom_width if "custom_width" in explicit
+            else export.get("custom_width")
+        ),
+        "custom_height": (
+            payload.custom_height if "custom_height" in explicit
+            else export.get("custom_height")
+        ),
+        "enhancement": (
+            payload.enhancement.model_dump()
+            if payload.enhancement is not None
+            else export.get("enhancement")
+        ),
         "framing": (
             payload.framing if "framing" in explicit
             else settings["branding"].get("framing", payload.framing)
@@ -319,13 +350,30 @@ def estimate_render(project_id: str, payload: RenderEstimateRequest, request: Re
     """
     state = get_state(request)
     project = state.repos.projects.get(project_id)
+    source = state.repos.sources.find_optional(project_id)
     profile = state.repos.profiles.get(project["profile_id"]) if project.get("profile_id") else None
     settings = resolve_settings(profile, project.get("overrides"))["settings"]
     raw = payload.compression if "compression" in payload.model_fields_set else None
     compression = _resolve_compression(
         raw if raw is not None else (settings.get("export") or {}).get("compression")
     )
-    base = ASPECT_DIMENSIONS[payload.aspect][int(payload.resolution)]
+    try:
+        target = normalise_target(
+            aspect=payload.aspect,
+            resolution=payload.resolution,
+            resolution_mode=payload.resolution_mode,
+            source_width=(source or {}).get("width"),
+            source_height=(source or {}).get("height"),
+            custom_width=payload.custom_width,
+            custom_height=payload.custom_height,
+        )
+    except ValueError as exc:
+        raise ValidationFailed(str(exc), code="invalid_resolution") from exc
+    base = (
+        target["custom_dimensions"]
+        if target["custom_dimensions"]
+        else ASPECT_DIMENSIONS[payload.aspect][int(target["resolution"])]
+    )
     width, height = compression.dimensions_for(base)
     fps = min(float(payload.fps or compression.max_fps or 30), 60.0)
     estimated = compression.estimate_bytes(dimensions=base, fps=fps, duration_ms=payload.duration_ms)
@@ -335,8 +383,12 @@ def estimate_render(project_id: str, payload: RenderEstimateRequest, request: Re
         "basis": "duration × estimated video bitrate + audio bitrate",
         "width": width,
         "height": height,
+        "requested_width": base[0],
+        "requested_height": base[1],
+        "resolution_mode": target["resolution_mode"],
         "fps": fps,
         "encode": compression.to_dict(),
+        "enhancement": payload.enhancement.model_dump() if payload.enhancement else None,
     }
 
 
@@ -366,6 +418,34 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
         spec.edit_spec_id = saved["id"]
         if "compression" in payload.model_fields_set:
             spec.encode = _compression_payload(settings, payload, payload.model_fields_set)
+        if payload.model_fields_set & {
+            "resolution", "resolution_mode", "custom_width", "custom_height"
+        }:
+            try:
+                target = normalise_target(
+                    aspect=spec.video.aspect,
+                    resolution=(
+                        payload.resolution
+                        if "resolution" in payload.model_fields_set
+                        else spec.video.resolution
+                    ),
+                    resolution_mode=(
+                        payload.resolution_mode
+                        if "resolution_mode" in payload.model_fields_set
+                        else spec.video.resolution_mode
+                    ),
+                    source_width=source.get("width"),
+                    source_height=source.get("height"),
+                    custom_width=payload.custom_width,
+                    custom_height=payload.custom_height,
+                )
+            except ValueError as exc:
+                raise ValidationFailed(str(exc), code="invalid_resolution") from exc
+            spec.video.resolution = target["resolution"]
+            spec.video.resolution_mode = target["resolution_mode"]
+            spec.video.custom_dimensions = target["custom_dimensions"]
+        if payload.enhancement is not None:
+            spec.enhancement = payload.enhancement
         if not spec.profile_snapshot:
             spec.profile_snapshot = saved["profile_snapshot"]
         render = state.repos.renders.create(
@@ -411,6 +491,19 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
     layout = _layout_payload(settings, payload)
     aspect = layout["aspect"]
     resolution = layout["resolution"]
+    try:
+        target = normalise_target(
+            aspect=aspect,
+            resolution=resolution,
+            resolution_mode=layout["resolution_mode"],
+            source_width=source.get("width"),
+            source_height=source.get("height"),
+            custom_width=layout.get("custom_width"),
+            custom_height=layout.get("custom_height"),
+        )
+    except ValueError as exc:
+        raise ValidationFailed(str(exc), code="invalid_resolution") from exc
+    resolution = target["resolution"]
     framing = layout["framing"]
     fps = layout["fps"]
     composition = layout["composition"]
@@ -440,9 +533,12 @@ def create_render(project_id: str, payload: RenderRequest, request: Request) -> 
             segments=segments,
             aspect=aspect,
             resolution=resolution,
+            resolution_mode=target["resolution_mode"],
+            custom_dimensions=target["custom_dimensions"],
             framing=framing,
             composition=composition,
             compression=compression,
+            enhancement=layout.get("enhancement"),
             crop_x_pct=crop_x_pct,
             crop_y_pct=crop_y_pct,
             face_cam_position=face_cam_position,
@@ -559,11 +655,26 @@ def composition_preview(
 
     layout = _layout_payload(settings, payload)
     try:
+        target = normalise_target(
+            aspect=layout["aspect"],
+            resolution=layout["resolution"],
+            resolution_mode=layout["resolution_mode"],
+            source_width=source.get("width"),
+            source_height=source.get("height"),
+            custom_width=layout.get("custom_width"),
+            custom_height=layout.get("custom_height"),
+        )
+    except ValueError as exc:
+        raise ValidationFailed(str(exc), code="invalid_resolution") from exc
+    try:
         spec = build_spec(
             source_id=source["id"],
             segments=segments,
             aspect=layout["aspect"],
-            resolution=layout["resolution"],
+            resolution=target["resolution"],
+            resolution_mode=target["resolution_mode"],
+            custom_dimensions=target["custom_dimensions"],
+            enhancement=layout.get("enhancement"),
             framing=layout["framing"],
             composition=layout["composition"],
             compression=resolve_encode(None),
@@ -737,6 +848,295 @@ def composition_preview(
             ),
             "fallback": fallback,
             "warnings": warnings,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _extract_rgb_frame(path: Path, at_ms: int, width: int, height: int) -> np.ndarray:
+    ffmpeg = require("ffmpeg")
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-ss", f"{max(0, at_ms) / 1000:.3f}", "-i", str(path),
+                "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ],
+            capture_output=True,
+            timeout=60,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValidationFailed("The comparison frame could not be decoded.", code="preview_failed") from exc
+    expected = width * height * 3
+    if result.returncode != 0 or len(result.stdout) < expected:
+        raise ValidationFailed(
+            "The comparison frame could not be decoded. The source may be unreadable.",
+            code="preview_failed",
+        )
+    return np.frombuffer(result.stdout[:expected], dtype=np.uint8).reshape(height, width, 3)
+
+
+def _render_still(
+    spec: RenderSpec,
+    *,
+    image: Path,
+    segment,
+    source_width: int,
+    source_height: int,
+    work: Path,
+    name: str,
+    noise_filter: str | None,
+) -> bytes:
+    command = build_image_preview_command(
+        spec,
+        image=image,
+        cwd=work,
+        segment=segment,
+        source_width=source_width,
+        source_height=source_height,
+        output_name=name,
+        noise_filter=noise_filter,
+    )
+    try:
+        execute(command, timeout_seconds=120)
+    except (TimeoutError, RuntimeError) as exc:
+        raise ValidationFailed(
+            "The comparison frame could not be composed.", code="preview_failed"
+        ) from exc
+    path = work / name
+    if not path.exists() or path.stat().st_size < 512:
+        raise ValidationFailed("The comparison frame was empty.", code="preview_failed")
+    return path.read_bytes()
+
+
+@router.post("/projects/{project_id}/renders/quality-preview")
+def quality_preview(project_id: str, payload: CompositionPreviewRequest, request: Request):
+    """Render the same source frame twice: original and enhanced.
+
+    Both stills go through the export framing chain with the same composition
+    decision, so the slider compares pixels, not framing or timestamp.
+    """
+    state = get_state(request)
+    project = state.repos.projects.get(project_id)
+    source = state.repos.sources.find_optional(project_id)
+    if source is None:
+        raise ValidationFailed("Import a video before comparing enhancement", code="source_missing")
+    if not source.get("has_video"):
+        raise ValidationFailed("This source has no video stream to compare", code="no_video_stream")
+
+    profile = state.repos.profiles.get(project["profile_id"]) if project.get("profile_id") else None
+    settings = resolve_settings(profile, project.get("overrides"))["settings"]
+    source_duration = int(source["duration_ms"])
+    if payload.candidate_id:
+        candidate = state.repos.candidates.get(project_id, payload.candidate_id)
+        segments, _, _ = _segments_for(payload, candidate, source)
+        title = payload.title or candidate.get("title")
+    elif payload.segments:
+        segments = [
+            {
+                "start_ms": int(raw.get("start_ms", 0)),
+                "end_ms": int(raw.get("end_ms", 0)),
+                "role": raw.get("role", "main"),
+            }
+            for raw in payload.segments
+        ]
+        title = payload.title
+    else:
+        raise ValidationFailed("No segments were provided", code="invalid_segment")
+
+    layout = _layout_payload(settings, payload)
+    compression = _compression_payload(settings, payload, payload.model_fields_set)
+    try:
+        target = normalise_target(
+            aspect=layout["aspect"],
+            resolution=layout["resolution"],
+            resolution_mode=layout["resolution_mode"],
+            source_width=source.get("width"),
+            source_height=source.get("height"),
+            custom_width=layout.get("custom_width"),
+            custom_height=layout.get("custom_height"),
+        )
+        spec = build_spec(
+            source_id=source["id"],
+            segments=segments,
+            aspect=layout["aspect"],
+            resolution=target["resolution"],
+            resolution_mode=target["resolution_mode"],
+            custom_dimensions=target["custom_dimensions"],
+            enhancement=layout.get("enhancement"),
+            framing=layout["framing"],
+            composition=layout["composition"],
+            compression=compression,
+            crop_x_pct=layout["crop_x_pct"],
+            crop_y_pct=layout["crop_y_pct"],
+            face_cam_position=layout["face_cam_position"],
+            face_cam_rect=layout["face_cam_rect"],
+            face_cam_overrides=layout["face_cam_overrides"],
+            stack_split_pct=layout["stack_split_pct"],
+            adaptive_stack=layout["adaptive_stack"],
+            captions_enabled=False,
+            captions_burn_in=False,
+            captions_sidecar=False,
+            fps=layout["fps"],
+            title=title,
+        )
+        spec.validate_against(source_duration)
+    except ValueError as exc:
+        raise ValidationFailed(str(exc), code="invalid_render_spec") from exc
+
+    try:
+        source_path = ensure_local(
+            state.storage,
+            source.get("relative_path"),
+            legacy_path=source.get("storage_path"),
+            missing_message="The original video file is missing from this project.",
+        )
+    except StorageObjectMissing as exc:
+        raise ValidationFailed(exc.message, code="source_missing") from exc
+
+    paths = ensure_layout(state.settings, project_id)
+    download = source.get("download") or {}
+    scene_fps = (download.get("processing") or {}).get("scene_fps")
+    analysis_path, analysis_height = visual_input(state.repos, state.storage, source, source_path)
+    plan = expand_composition(
+        spec,
+        analysis_path,
+        source.get("width"),
+        source.get("height"),
+        source_duration_ms=source_duration,
+        cache_dir=paths / "analysis" / "scenes",
+        scene_fps=scene_fps,
+        analysis_height=analysis_height,
+    )
+    spec.segments = plan.segments
+    spec.facecam_track = plan.facecam_track
+    selected = None
+    if payload.preview_at_ms is not None:
+        for segment in spec.segments:
+            if segment.start_ms <= payload.preview_at_ms < segment.end_ms:
+                selected = segment
+                break
+    if selected is None:
+        selected = spec.segments[0]
+    at = payload.preview_at_ms if payload.preview_at_ms is not None else (
+        selected.start_ms + selected.duration_ms // 2
+    )
+    at = max(selected.start_ms, min(selected.end_ms - 1, int(at)))
+
+    source_width = int(source.get("width") or 0)
+    source_height = int(source.get("height") or 0)
+    enhancement_plan = resolve_plan(spec, source_width=source_width, source_height=source_height)
+    warnings = list(dict.fromkeys([*plan.warnings, *enhancement_plan.warnings]))
+    available, unavailable_reason = plan_is_available(enhancement_plan, state.settings)
+    applied_model = None
+    engine_label = enhancement_plan.engine_label
+    device = None
+    enhanced_image: Path | None = None
+    enhanced_width, enhanced_height = source_width, source_height
+    noise_for_enhanced = None
+    measured_frame_seconds: float | None = None
+
+    work = paths / "tmp" / f"quality-{uuid.uuid4().hex}"
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        frame = _extract_rgb_frame(source_path, at, source_width, source_height)
+        original_image = work / "original.png"
+        Image.fromarray(frame).save(original_image)
+        if enhancement_plan.uses_ai and enhancement_plan.model is not None and available:
+            try:
+                engine = engine_for(enhancement_plan.model, models_dir=state.settings.models_dir)
+                frame_started = time.monotonic()
+                enhanced = apply_frame(frame, enhancement_plan, engine)
+                measured_frame_seconds = round(time.monotonic() - frame_started, 2)
+                enhanced_width, enhanced_height = enhanced.shape[1], enhanced.shape[0]
+                enhanced_image = work / "enhanced.png"
+                Image.fromarray(enhanced).save(enhanced_image)
+                applied_model = enhancement_plan.model.id
+                device = engine.device
+                engine_label = enhancement_plan.model.label
+            except ModelUnavailable as exc:
+                warnings.append(
+                    f"{exc} The comparison shows conventional resizing instead; no AI model ran."
+                )
+        elif enhancement_plan.uses_ai:
+            warnings.append(
+                f"{unavailable_reason} The comparison shows conventional resizing instead; no AI model ran."
+            )
+        if enhanced_image is not None:
+            noise_for_enhanced = None
+        elif enhancement_plan.uses_ai:
+            noise_for_enhanced = denoise_filter(enhancement_plan.denoise)
+        elif enhancement_plan.profile == "clean":
+            noise_for_enhanced = denoise_filter(enhancement_plan.denoise)
+
+        original_bytes = _render_still(
+            spec,
+            image=original_image,
+            segment=selected,
+            source_width=source_width,
+            source_height=source_height,
+            work=work,
+            name="original.jpg",
+            noise_filter=None,
+        )
+        enhanced_bytes = _render_still(
+            spec,
+            image=enhanced_image or original_image,
+            segment=selected,
+            source_width=enhanced_width,
+            source_height=enhanced_height,
+            work=work,
+            name="enhanced.jpg",
+            noise_filter=noise_for_enhanced,
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    benchmark = (
+        load_benchmark(state.settings.models_dir, enhancement_plan.model.id)
+        if enhancement_plan.model is not None
+        else None
+    )
+    frame_seconds = None
+    if benchmark and source_width and source_height:
+        frame_seconds = round(
+            float(benchmark.get("seconds_per_input_megapixel") or 0)
+            * source_width * source_height / 1_000_000,
+            2,
+        )
+    width, height = spec.output_dimensions
+    return JSONResponse(
+        content={
+            "original": f"data:image/jpeg;base64,{base64.b64encode(original_bytes).decode('ascii')}",
+            "enhanced": f"data:image/jpeg;base64,{base64.b64encode(enhanced_bytes).decode('ascii')}",
+            "width": width,
+            "height": height,
+            "timestamp_ms": at,
+            "segment": {
+                "start_ms": selected.start_ms,
+                "end_ms": selected.end_ms,
+                "duration_ms": selected.duration_ms,
+            },
+            "source": {"width": source_width, "height": source_height},
+            "target": list(enhancement_plan.target),
+            "intermediate": (
+                list(enhancement_plan.intermediate) if enhancement_plan.intermediate else None
+            ),
+            "profile": enhancement_plan.profile,
+            "applied_model": applied_model,
+            "engine": engine_label,
+            "device": device,
+            "available": available,
+            "benchmark": benchmark,
+            "estimated_frame_seconds": frame_seconds or measured_frame_seconds,
+            "approximate": True,
+            "decision": selected.composition.model_dump(mode="json") if selected.composition else None,
+            "warnings": warnings,
+            "notes": [
+                "Both frames use the same source timestamp and composition decision.",
+                "AI reconstruction can invent texture; a sharper frame is not proof of recovered detail.",
+            ],
         },
         headers={"Cache-Control": "no-store"},
     )

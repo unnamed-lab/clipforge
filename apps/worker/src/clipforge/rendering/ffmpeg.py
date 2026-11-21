@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from clipforge.enhancement.settings import denoise_filter
 from clipforge.media.process import ProcessCancelled, ProcessFailed, ProcessTimeout, require, run
 from clipforge.rendering.spec import CompositionDecision, Rect, RenderSpec, SegmentSpan
 
@@ -110,12 +111,12 @@ def _composition_chain(
             gh = max(0.01, min(1.0 - gy, game.height_pct))
             game_chain = (
                 f"[gamesrc_{uid}]crop=iw*{gw:.4f}:ih*{gh:.4f}:iw*{gx:.4f}:ih*{gy:.4f},"
-                f"scale={width}:{game_height}:force_original_aspect_ratio=increase,"
+                f"scale={width}:{game_height}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop={width}:{game_height},setsar=1[game_{uid}]"
             )
         else:
             game_chain = (
-                f"[gamesrc_{uid}]scale={width}:{game_height}:force_original_aspect_ratio=increase,"
+                f"[gamesrc_{uid}]scale={width}:{game_height}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop={width}:{game_height}:(iw-ow)*0.5:(ih-oh)*0.5,setsar=1[game_{uid}]"
             )
 
@@ -127,7 +128,7 @@ def _composition_chain(
             ph = max(0.01, min(1.0 - py, panel.height_pct))
             cam_chain = (
                 f"[camsrc_{uid}]crop=iw*{pw:.4f}:ih*{ph:.4f}:iw*{px:.4f}:ih*{py:.4f},"
-                f"scale={width}:{cam_height}:force_original_aspect_ratio=increase,"
+                f"scale={width}:{cam_height}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop={width}:{cam_height},setsar=1[cam_{uid}]"
             )
         else:
@@ -137,7 +138,7 @@ def _composition_chain(
             fh = max(0.01, min(1.0 - fy, face.height_pct))
             cam_chain = (
                 f"[camsrc_{uid}]crop=iw*{fw:.4f}:ih*{fh:.4f}:iw*{fx:.4f}:ih*{fy:.4f},"
-                f"scale={width}:{cam_height}:force_original_aspect_ratio=decrease,"
+                f"scale={width}:{cam_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
                 f"pad={width}:{cam_height}:(ow-iw)/2:(oh-ih)/2:color={pad_colour},setsar=1[cam_{uid}]"
             )
 
@@ -168,7 +169,7 @@ def _composition_chain(
                 f"iw*{source.x_pct:.4f}:ih*{source.y_pct:.4f},"
             )
         chain = (
-            f"{input_label}{source_crop}scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"{input_label}{source_crop}scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={width}:{height}:(iw-ow)*{x:.4f}:(ih-oh)*{y:.4f},setsar=1"
         )
         return chain + f"[{output_label}]"
@@ -185,10 +186,10 @@ def _composition_chain(
             y = "(H-h)/2"
         chain = (
             f"{input_label}split=2[bgsrc_{uid}][fgsrc_{uid}];"
-            f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.08:saturation=0.85,"
             f"setsar=1[bg_{uid}];"
-            f"[fgsrc_{uid}]scale={pip_width}:{pip_height}:force_original_aspect_ratio=decrease,"
+            f"[fgsrc_{uid}]scale={pip_width}:{pip_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
             f"setsar=1[fg_{uid}];"
             f"[bg_{uid}][fg_{uid}]overlay=(W-w)/2:{y}:shortest=1[composed_{uid}];"
             f"[composed_{uid}]setsar=1"
@@ -211,7 +212,7 @@ def _composition_chain(
         background_color = decision.background_color if decision.background == "solid" else "#000000"
         chain = (
             f"color=c={background_color}:s={width}x{height}:r={fps}[bg_{uid}];"
-            f"{input_label}{source_crop}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
+            f"{input_label}{source_crop}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
             f"setsar=1[fg_{uid}];"
             f"[bg_{uid}][fg_{uid}]overlay={x}:{y}:shortest=1[composed_{uid}];"
             f"[composed_{uid}]setsar=1"
@@ -220,10 +221,10 @@ def _composition_chain(
 
     chain = (
         f"{input_label}split=2[bgsrc_{uid}][fgsrc_{uid}];"
-        f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.08:saturation=0.85,"
         f"setsar=1[bg_{uid}];"
-        f"[fgsrc_{uid}]{source_crop}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease,"
+        f"[fgsrc_{uid}]{source_crop}scale={fg_width}:{fg_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"setsar=1[fg_{uid}];"
         f"[bg_{uid}][fg_{uid}]overlay={x}:{y}[composed_{uid}];"
         f"[composed_{uid}]setsar=1"
@@ -249,17 +250,17 @@ def _framing_chain(spec: RenderSpec, width: int, height: int, input_label: str,
         uid = output_label
         chain = (
             f"{input_label}split=2[bgsrc_{uid}][fgsrc_{uid}];"
-            f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"[bgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.08:saturation=0.85,"
             f"setsar=1[bgblur_{uid}];"
-            f"[fgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"[fgsrc_{uid}]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
             f"setsar=1[fgfit_{uid}];"
             f"[bgblur_{uid}][fgfit_{uid}]overlay=(W-w)/2:(H-h)/2[composed_{uid}];"
             f"[composed_{uid}]setsar=1"
         )
     else:
         chain = (
-            f"{input_label}scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"{input_label}scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={width}:{height},setsar=1"
         )
     return chain + f"[{output_label}]"
@@ -343,7 +344,7 @@ def _logo_filters(spec: RenderSpec, video_label: str, width: int, height: int, l
     elif logo.to_ms is not None:
         enable = f":enable='lte(t,{logo.to_ms / 1000:.3f})'"
     return [
-        f"[{logo_index}:v]scale={logo_width}:-1,format=rgba,"
+        f"[{logo_index}:v]scale={logo_width}:-1:flags=lanczos,format=rgba,"
         f"colorchannelmixer=aa={logo.opacity:.3f}[logo]",
         f"{video_label}[logo]overlay={x}:{y}{enable}[vout]",
     ]
@@ -360,6 +361,7 @@ def build_command(
     output_name: str = "out.mp4",
     source_width: int | None = None,
     source_height: int | None = None,
+    video_sources: list[Path | None] | None = None,
 ) -> RenderCommand:
     ffmpeg = require("ffmpeg")
     width, height = spec.output_dimensions
@@ -372,10 +374,36 @@ def build_command(
         ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     ]
 
+    if video_sources is not None and len(video_sources) != len(spec.segments):
+        raise ValueError("An enhanced input must be provided for every segment, or for none")
+
+    video_indexes: list[int] = []
     audio_indexes: list[int] = []
     next_input = 0
-    for segment in spec.segments:
+    for index, segment in enumerate(spec.segments):
+        enhanced = video_sources[index] if video_sources is not None else None
+        if enhanced is not None:
+            # The intermediate is video-only and starts at source time zero for
+            # this segment. Audio still comes from the retained original, so it
+            # is never re-encoded twice and cannot drift.
+            args += ["-t", _seconds(segment.duration_ms), "-i", str(enhanced)]
+            video_indexes.append(next_input)
+            next_input += 1
+            if has_audio:
+                args += [
+                    "-ss", _seconds(segment.start_ms),
+                    "-t", _seconds(segment.duration_ms),
+                    "-i", str(source),
+                ]
+                audio_indexes.append(next_input)
+                next_input += 1
+            else:
+                args += ["-f", "lavfi", "-t", _seconds(segment.duration_ms), "-i", SILENCE_LABEL]
+                audio_indexes.append(next_input)
+                next_input += 1
+            continue
         args += ["-ss", _seconds(segment.start_ms), "-t", _seconds(segment.duration_ms), "-i", str(source)]
+        video_indexes.append(next_input)
         audio_indexes.append(next_input)
         next_input += 1
         if not has_audio:
@@ -400,10 +428,19 @@ def build_command(
     audio_inputs: list[str] = []
 
     caption_filter = f",ass={captions_name}:fontsdir=fonts" if captions_name else ""
+    # Denoising belongs to the source pixels, before any split/crop/stack, so it
+    # is applied once per frame. An enhanced intermediate has already been
+    # denoised by the enhancement pass and must not be filtered twice.
+    noise_filter = denoise_filter(spec.enhancement.denoise)
     for index, segment in enumerate(spec.segments):
+        video_label = f"[{video_indexes[index]}:v]"
+        enhanced = video_sources is not None and video_sources[index] is not None
+        if noise_filter and not enhanced:
+            filters.append(f"{video_label}{noise_filter}[src{index}]")
+            video_label = f"[src{index}]"
         filters.append(
             _framing_chain(
-                spec, width, height, f"[{index}:v]", f"v{index}", segment, source_aspect, fps=fps
+                spec, width, height, video_label, f"v{index}", segment, source_aspect, fps=fps
             )
         )
         video_inputs.append(f"[v{index}]")
@@ -481,6 +518,45 @@ def build_preview_command(
         output_name,
     ]
     return RenderCommand(args=args, cwd=cwd, output_name=output_name, expected_duration_ms=segment.duration_ms)
+
+
+def build_image_preview_command(
+    spec: RenderSpec,
+    *,
+    image: Path,
+    cwd: Path,
+    segment: SegmentSpan,
+    source_width: int,
+    source_height: int,
+    output_name: str = "preview.jpg",
+    noise_filter: str | None = None,
+) -> RenderCommand:
+    """Compose one already-decoded still through the export framing chain.
+
+    This is used by the quality comparison: both the original frame and the
+    enhanced frame are written to disk first and then drawn by the same filters,
+    so the only difference between the two images is pixel quality.
+    """
+    ffmpeg = require("ffmpeg")
+    width, height = spec.output_dimensions
+    source_aspect = source_width / max(1, source_height)
+    label = "[0:v]"
+    filters = []
+    if noise_filter:
+        filters.append(f"{label}{noise_filter}[noisy]")
+        label = "[noisy]"
+    chain = _framing_chain(
+        spec, width, height, label, "vpreview", segment, source_aspect, fps=_fps(spec, None)
+    )
+    filters.append(f"{chain};[vpreview]format=yuvj420p[preview]")
+    args: list[str] = [
+        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(image),
+        "-filter_complex", ";".join(filters),
+        "-map", "[preview]", "-frames:v", "1", "-q:v", "2",
+        output_name,
+    ]
+    return RenderCommand(args=args, cwd=cwd, output_name=output_name, expected_duration_ms=0)
 
 
 @dataclass

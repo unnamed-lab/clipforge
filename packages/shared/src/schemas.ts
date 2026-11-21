@@ -1036,6 +1036,91 @@ export const compressionChoiceSchema = z
   .passthrough();
 export type CompressionChoice = z.infer<typeof compressionChoiceSchema>;
 
+export const enhancementProfileSchema = z.enum(["standard", "clean", "ai", "ai_plus"]);
+export type EnhancementProfile = z.infer<typeof enhancementProfileSchema>;
+
+export const enhancementModelIdSchema = z.enum([
+  "auto",
+  "espcn-x2",
+  "espcn-x4",
+  "realesrgan-x2",
+]);
+export type EnhancementModelId = z.infer<typeof enhancementModelIdSchema>;
+
+export const enhancementSettingsSchema = z.object({
+  profile: enhancementProfileSchema.default("standard"),
+  model_id: enhancementModelIdSchema.default("auto"),
+  denoise: z.number().int().min(0).max(100).default(0),
+  restoration: z.number().min(0).max(1).default(1),
+  allow_fallback: z.boolean().default(true),
+  temporal_stabilize: z.boolean().default(false),
+  compare_first: z.boolean().default(false),
+});
+export type EnhancementSettings = z.infer<typeof enhancementSettingsSchema>;
+
+export const enhancementBenchmarkSchema = z
+  .object({
+    model: z.string(),
+    model_version: z.string().optional(),
+    device: z.string(),
+    seconds_per_input_megapixel: z.number(),
+    measured_at: z.string().optional(),
+    method: z.string().optional(),
+  })
+  .passthrough();
+
+export const enhancementModelSchema = z
+  .object({
+    id: enhancementModelIdSchema.exclude(["auto"]),
+    label: z.string(),
+    engine: z.enum(["espcn", "realesrgan"]),
+    scale: z.number(),
+    version: z.string(),
+    licence: z.string(),
+    licence_url: z.string(),
+    size_bytes: z.number(),
+    installed: z.boolean(),
+    bundled: z.boolean(),
+    downloadable: z.boolean(),
+    download_url: z.string().nullable(),
+    sha256: z.string().nullable(),
+    notes: z.string(),
+    benchmark: enhancementBenchmarkSchema.nullable().optional(),
+  })
+  .passthrough();
+export type EnhancementModel = z.infer<typeof enhancementModelSchema>;
+
+export const enhancementCapabilitiesSchema = z
+  .object({
+    profiles: z.array(
+      z.object({
+        id: enhancementProfileSchema,
+        label: z.string(),
+        summary: z.string(),
+        engine: z.string(),
+        default_denoise: z.number(),
+        default_restoration: z.number(),
+        warnings: z.array(z.string()),
+        uses_ai: z.boolean(),
+      }),
+    ),
+    models: z.array(enhancementModelSchema),
+    devices: z.object({
+      providers: z.array(z.string()),
+      device: z.string(),
+      gpu_inference: z.boolean(),
+      onnxruntime: z.boolean(),
+      opencv_dnn_superres: z.boolean(),
+      cpu_fallback: z.boolean(),
+    }),
+    gpu_required: z.boolean(),
+    frame_interpolation: z.boolean(),
+    model_download_requires_consent: z.boolean(),
+    notes: z.array(z.string()),
+  })
+  .passthrough();
+export type EnhancementCapabilities = z.infer<typeof enhancementCapabilitiesSchema>;
+
 export const capabilitiesSchema = z
   .object({
     version: z.string(),
@@ -1114,6 +1199,7 @@ export const capabilitiesSchema = z
         gpu_required: z.boolean(),
       })
       .optional(),
+    enhancement: enhancementCapabilitiesSchema.optional(),
     platform: z.object({ os: z.string(), release: z.string(), cpu_count: z.number(), python: z.string() }),
   })
   .passthrough();
@@ -1138,7 +1224,11 @@ export const renderRequestSchema = z.object({
     .array(z.object({ start_ms: z.number(), end_ms: z.number(), composition: z.record(z.string(), z.unknown()).optional() }))
     .optional(),
   aspect: z.enum(["9:16", "16:9", "1:1"]),
-  resolution: z.union([z.literal(720), z.literal(1080)]),
+  resolution: z.union([z.literal(720), z.literal(1080), z.literal(1440), z.literal(2160)]),
+  resolution_mode: z.enum(["class", "source", "custom"]).default("class"),
+  custom_width: z.number().int().min(320).max(3840).optional(),
+  custom_height: z.number().int().min(320).max(4320).optional(),
+  enhancement: enhancementSettingsSchema.optional(),
   framing: z.enum(["crop", "blur"]),
   composition: compositionModeSchema.default("auto"),
   composition_overrides: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),

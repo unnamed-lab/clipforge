@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from clipforge.discovery.criteria import DiscoveryCriteria
+from clipforge.enhancement.settings import EnhancementSettings
 from clipforge.rendering.spec import DEFAULT_CAPTION_PRESET, CaptionSettings, FaceCamOverride, Rect
 
 
@@ -162,7 +163,11 @@ class RenderRequest(BaseModel):
     candidate_id: str | None = None
     segments: list[dict] | None = None
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
-    resolution: Literal[720, 1080] = 1080
+    resolution: Literal[720, 1080, 1440, 2160] = 1080
+    resolution_mode: Literal["class", "source", "custom"] = "class"
+    custom_width: int | None = Field(default=None, ge=180, le=3840)
+    custom_height: int | None = Field(default=None, ge=180, le=4320)
+    enhancement: EnhancementSettings | None = None
     framing: Literal["crop", "blur"] = "crop"
     composition: Literal["auto", "crop", "fit", "pip", "split", "stack", "facecam_focus", "manual"] = "auto"
     composition_overrides: dict[str, dict] | None = None
@@ -207,10 +212,14 @@ class CompositionPreviewRequest(RenderRequest):
 
 class RenderEstimateRequest(BaseModel):
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
-    resolution: Literal[720, 1080] = 1080
+    resolution: Literal[720, 1080, 1440, 2160] = 1080
+    resolution_mode: Literal["class", "source", "custom"] = "class"
+    custom_width: int | None = Field(default=None, ge=180, le=3840)
+    custom_height: int | None = Field(default=None, ge=180, le=4320)
     fps: int | None = Field(default=None, ge=15, le=60)
     duration_ms: int = Field(gt=0, le=86_400_000)
     compression: dict | None = None
+    enhancement: EnhancementSettings | None = None
 
 
 class SceneInspectRequest(BaseModel):

@@ -11,6 +11,7 @@ from typing import Callable
 
 from clipforge.config import Settings
 from clipforge.db.repositories import Repositories
+from clipforge.enhancement.service import prepare_enhancement
 from clipforge.errors import AppError, JobFailed
 from clipforge.media.assets import visual_input
 from clipforge.media.process import ProcessCancelled
@@ -192,11 +193,14 @@ def _prepare_assets(spec: RenderSpec, repos: Repositories, storage: StorageBacke
     return warnings
 
 
-def _export_resolution_warnings(source: dict, spec: RenderSpec) -> list[str]:
+def _export_resolution_warnings(
+    source: dict, spec: RenderSpec, *, applied_model: str | None = None
+) -> list[str]:
     """Say when the retained source cannot support the requested export size.
 
     The retained source is the only export input. A proxy is smaller by design,
     so using one here would silently throw away detail the user chose to keep.
+    AI output is described as reconstruction, never as recovered native detail.
     """
     out_width, out_height = spec.output_dimensions
     source_width = int(source.get("width") or 0)
@@ -206,10 +210,29 @@ def _export_resolution_warnings(source: dict, spec: RenderSpec) -> list[str]:
     if out_width <= source_width and out_height <= source_height:
         return []
     factor = max(out_width / source_width, out_height / source_height)
+    if applied_model:
+        return [
+            f"The export is {out_width}×{out_height} from a {source_width}×{source_height} source. "
+            f"{applied_model} enlarged the frame by about {factor:.2f}× and can reconstruct plausible "
+            "edges and texture, but it cannot recover detail the source never captured. "
+            "Check a comparison frame before publishing."
+        ]
     return [
         f"The export is {out_width}×{out_height} but the retained source is "
         f"{source_width}×{source_height}. The encoder upscales by about {factor:.2f}×, so no extra "
         "detail is recovered. Import a higher-quality source for a sharper export."
+    ]
+
+
+def _compression_cap_warning(spec: RenderSpec) -> list[str]:
+    target = spec.video.dimensions
+    encoded = spec.output_dimensions
+    if target == encoded:
+        return []
+    return [
+        f"The composition target is {target[0]}×{target[1]} but the compression cap encodes at "
+        f"{encoded[0]}×{encoded[1]}. Choose Higher quality or a custom compression cap to keep the "
+        "larger frame."
     ]
 
 
@@ -263,7 +286,6 @@ def perform_render(
     on_stage("assets", 2, "Checking brand assets and audio policy")
     warnings = [
         *encode_warnings,
-        *_export_resolution_warnings(source, spec),
         *_prepare_assets(spec, repos, storage, work),
     ]
     overlay_report = {
@@ -327,8 +349,43 @@ def perform_render(
             else:
                 warnings.append("Captions were requested but this span has no word timings.")
 
+    enhanced_report: dict = {}
+    if spec.enhancement.uses_ai:
+        on_stage("enhancing", 4, "Preparing the AI enhancement pass")
+        enhancement = prepare_enhancement(
+            spec,
+            source=source,
+            source_path=source_path,
+            settings=settings,
+            project_id=project_id,
+            on_progress=lambda fraction, message: on_stage(
+                "enhancing", 4 + max(0.0, min(1.0, fraction)) * 66, message
+            ),
+            cancel=cancel_event,
+        )
+        enhanced_report = enhancement.report
+        warnings.extend(enhancement.warnings)
+        enhanced_inputs = enhancement.video_inputs
+    else:
+        enhancement = prepare_enhancement(
+            spec,
+            source=source,
+            source_path=source_path,
+            settings=settings,
+            project_id=project_id,
+            cancel=cancel_event,
+        )
+        enhanced_report = enhancement.report
+        warnings.extend(enhancement.warnings)
+        enhanced_inputs = enhancement.video_inputs
+
+    applied_model = enhanced_report.get("applied_model")
+    warnings.extend(_export_resolution_warnings(source, spec, applied_model=applied_model))
+    warnings.extend(_compression_cap_warning(spec))
     warnings = list(dict.fromkeys(warnings))
-    on_stage("rendering", 5, "Encoding video")
+    render_start = 70.0 if applied_model else 5.0
+    render_span = 95.0 - render_start
+    on_stage("rendering", render_start, "Encoding video")
     command = build_command(
         spec,
         source=source_path,
@@ -339,10 +396,11 @@ def perform_render(
         output_name=OUTPUT_FILENAME,
         source_width=source.get("width"),
         source_height=source.get("height"),
+        video_sources=enhanced_inputs,
     )
 
     def handle_progress(percent: float) -> None:
-        on_stage("rendering", 5 + percent * 0.89, "Encoding video")
+        on_stage("rendering", render_start + percent * (render_span / 100), "Encoding video")
 
     try:
         outcome = execute(command, cancel=cancel_event, on_progress=handle_progress, timeout_seconds=2400)
@@ -384,6 +442,7 @@ def perform_render(
         caption_report=caption_report,
         overlay_report=overlay_report,
         ending_review=ending_review,
+        enhancement_report=enhanced_report,
         info=info,
     )
     if gate["blocking"]:
@@ -445,5 +504,6 @@ def perform_render(
         "subtitle_path": subtitle_key,
         "warnings": warnings,
         "review": gate,
+        "enhancement": enhanced_report,
         "encode_seconds": round(outcome.duration_seconds, 1),
     }

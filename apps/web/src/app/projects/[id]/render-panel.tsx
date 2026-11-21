@@ -1,8 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Download, Film, Loader2, Type } from "lucide-react";
-import type { Capabilities, Render } from "@clipforge/shared";
+import { ChevronDown, Download, Film, Loader2, Sparkles, Type } from "lucide-react";
+import type {
+  Capabilities,
+  EnhancementProfile,
+  EnhancementSettings,
+  Render,
+  Source,
+} from "@clipforge/shared";
 import {
   ASPECTS,
   CAPTION_ALIGNMENTS,
@@ -24,6 +30,14 @@ import {
 } from "@clipforge/shared";
 import { Alert, Badge, EmptyState } from "@/components/ui";
 import { apiJson } from "@/lib/api";
+import {
+  QUALITY_PROFILE_FALLBACK,
+  TARGET_OPTIONS,
+  estimatedEnhancementSeconds,
+  formatSeconds,
+  resolveTarget,
+  type TargetMode,
+} from "@/lib/quality";
 import { cn } from "@/lib/utils";
 
 type AspectId = (typeof ASPECTS)[number]["id"];
@@ -161,9 +175,29 @@ function normalizeFaceCamOverrides(value: unknown): FaceCamOverrideDraft[] {
   return result;
 }
 
+type QualityPreview = {
+  original: string;
+  enhanced: string;
+  width: number;
+  height: number;
+  timestamp_ms: number;
+  source: { width: number; height: number };
+  target: [number, number];
+  intermediate: [number, number] | null;
+  profile: EnhancementProfile;
+  applied_model: string | null;
+  engine: string;
+  device: string | null;
+  available: boolean;
+  estimated_frame_seconds: number | null;
+  warnings: string[];
+  notes: string[];
+};
+
 export function RenderPanel({
   projectId,
   candidateId,
+  source,
   capabilities,
   durationMs,
   renders,
@@ -174,6 +208,7 @@ export function RenderPanel({
 }: {
   projectId: string;
   candidateId: string;
+  source: Source;
   capabilities: Capabilities | null;
   durationMs: number;
   renders: Render[];
@@ -183,7 +218,23 @@ export function RenderPanel({
   disabledReason: string;
 }) {
   const [aspect, setAspect] = useState<AspectId>("9:16");
-  const [resolution, setResolution] = useState<720 | 1080>(1080);
+  const [targetMode, setTargetMode] = useState<TargetMode>("1080");
+  const [targetWidth, setTargetWidth] = useState(source.width || 1080);
+  const [targetHeight, setTargetHeight] = useState(source.height || 1920);
+  const [qualityProfile, setQualityProfile] = useState<EnhancementProfile>("standard");
+  const [enhancementModel, setEnhancementModel] = useState<EnhancementSettings["model_id"]>("auto");
+  const [denoise, setDenoise] = useState(0);
+  const [restoration, setRestoration] = useState(1);
+  const [allowFallback, setAllowFallback] = useState(true);
+  const [temporalStabilize, setTemporalStabilize] = useState(false);
+  const [qualityPreview, setQualityPreview] = useState<QualityPreview | null>(null);
+  const [qualityPreviewBusy, setQualityPreviewBusy] = useState(false);
+  const [qualityPreviewError, setQualityPreviewError] = useState<string | null>(null);
+  const [comparisonPct, setComparisonPct] = useState(50);
+  const [modelInstallJob, setModelInstallJob] = useState<string | null>(null);
+  const [installedNow, setInstalledNow] = useState<string[]>([]);
+  const [installMessage, setInstallMessage] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
   const [composition, setComposition] = useState<CompositionModeId>("auto");
   const [faceCamPosition, setFaceCamPosition] = useState<FaceCamPositionId>(DEFAULT_FACE_CAM_POSITION);
   const [stackSplit, setStackSplit] = useState(60);
@@ -225,6 +276,75 @@ export function RenderPanel({
     [compression, customCrf, customAudio, customWidth, customFps],
   );
 
+  const targetInfo = useMemo(
+    () =>
+      resolveTarget({
+        mode: targetMode,
+        aspect,
+        classResolution: 1080,
+        source,
+        customWidth: targetWidth,
+        customHeight: targetHeight,
+      }),
+    [targetMode, aspect, source, targetWidth, targetHeight],
+  );
+
+  const resolution = targetInfo.resolution;
+
+  const enhancement = useMemo<EnhancementSettings>(
+    () => ({
+      profile: qualityProfile,
+      model_id: enhancementModel,
+      denoise,
+      restoration,
+      allow_fallback: allowFallback,
+      temporal_stabilize: temporalStabilize,
+      compare_first: qualityProfile === "ai_plus",
+    }),
+    [qualityProfile, enhancementModel, denoise, restoration, allowFallback, temporalStabilize],
+  );
+
+  const profileMeta =
+    capabilities?.enhancement?.profiles.find((entry) => entry.id === qualityProfile) ??
+    {
+      ...QUALITY_PROFILE_FALLBACK[qualityProfile],
+      id: qualityProfile,
+      warnings: [],
+      uses_ai: qualityProfile === "ai" || qualityProfile === "ai_plus",
+      default_denoise: QUALITY_PROFILE_FALLBACK[qualityProfile].denoise,
+      default_restoration: QUALITY_PROFILE_FALLBACK[qualityProfile].restoration,
+    };
+  const enhancementModels = capabilities?.enhancement?.models ?? [];
+  const neededScale = Math.max(
+    targetInfo.width / Math.max(1, source.width || targetInfo.width),
+    targetInfo.height / Math.max(1, source.height || targetInfo.height),
+  );
+  const autoModelId: EnhancementSettings["model_id"] =
+    (qualityProfile === "ai_plus" && neededScale > 1.35) || neededScale > 2.25
+      ? "espcn-x4"
+      : "espcn-x2";
+  const estimateModelId = enhancementModel !== "auto" ? enhancementModel : autoModelId;
+  const estimateModel = enhancementModels.find((model) => model.id === estimateModelId);
+  const selectedModel = enhancementModels.find((model) => model.id === enhancementModel);
+  const modelInstalled =
+    enhancementModel === "auto" ||
+    Boolean(selectedModel?.installed) ||
+    installedNow.includes(enhancementModel);
+  const aiRuntimeReady =
+    enhancementModel === "realesrgan-x2"
+      ? Boolean(capabilities?.enhancement?.devices.onnxruntime)
+      : Boolean(capabilities?.enhancement?.devices.opencv_dnn_superres);
+  const requiresComparison = qualityProfile === "ai_plus" && qualityPreview === null;
+  const enhancementEstimate = estimatedEnhancementSeconds({
+    profile: qualityProfile,
+    benchmarkSecondsPerMegapixel: estimateModel?.benchmark?.seconds_per_input_megapixel,
+    sourceWidth: source.width || targetInfo.width,
+    sourceHeight: source.height || targetInfo.height,
+    durationMs,
+    fps: source.fps,
+    maxFps: customFps,
+  });
+
   const settingsSnapshot = useMemo(
     () =>
       JSON.stringify({
@@ -234,6 +354,13 @@ export function RenderPanel({
         alignment: captionAlignment,
         margin_v: captionMarginV,
         export_compression: compressionBody,
+        target_mode: targetMode,
+        quality_profile: qualityProfile,
+        enhancement_model: enhancementModel,
+        denoise,
+        restoration,
+        allow_fallback: allowFallback,
+        temporal_stabilize: temporalStabilize,
         composition,
         face_cam_position: faceCamPosition,
         stack_split_pct: stackSplit,
@@ -249,6 +376,13 @@ export function RenderPanel({
       captionAlignment,
       captionMarginV,
       compressionBody,
+      targetMode,
+      qualityProfile,
+      enhancementModel,
+      denoise,
+      restoration,
+      allowFallback,
+      temporalStabilize,
       composition,
       faceCamPosition,
       stackSplit,
@@ -345,6 +479,41 @@ export function RenderPanel({
         setCustomAudio(nextCustom.audio);
         setCustomWidth(nextCustom.width);
         setCustomFps(nextCustom.fps);
+
+        const targetModes: TargetMode[] = ["source", "720", "1080", "1440", "2160", "custom"];
+        const storedTargetMode = targetModes.includes(storedExport.resolution_mode as TargetMode)
+          ? (storedExport.resolution_mode as TargetMode)
+          : "1080";
+        const storedEnhancement = (
+          typeof storedExport.enhancement === "object" && storedExport.enhancement !== null
+            ? (storedExport.enhancement as Record<string, unknown>)
+            : {}
+        ) as Record<string, unknown>;
+        const storedProfile =
+          storedEnhancement.profile === "clean" ||
+          storedEnhancement.profile === "ai" ||
+          storedEnhancement.profile === "ai_plus" ||
+          storedEnhancement.profile === "standard"
+            ? (storedEnhancement.profile as EnhancementProfile)
+            : "standard";
+        const storedModel =
+          storedEnhancement.model_id === "espcn-x2" ||
+          storedEnhancement.model_id === "espcn-x4" ||
+          storedEnhancement.model_id === "realesrgan-x2"
+            ? (storedEnhancement.model_id as EnhancementSettings["model_id"])
+            : "auto";
+        setTargetMode(storedTargetMode);
+        setQualityProfile(storedProfile);
+        setEnhancementModel(storedModel);
+        setDenoise(typeof storedEnhancement.denoise === "number" ? storedEnhancement.denoise : 0);
+        setRestoration(
+          typeof storedEnhancement.restoration === "number" ? storedEnhancement.restoration : 1,
+        );
+        setAllowFallback(storedEnhancement.allow_fallback !== false);
+        setTemporalStabilize(storedEnhancement.temporal_stabilize === true);
+        if (typeof storedExport.custom_width === "number") setTargetWidth(storedExport.custom_width);
+        if (typeof storedExport.custom_height === "number") setTargetHeight(storedExport.custom_height);
+
         savedSnapshotRef.current = JSON.stringify({
           preset,
           position,
@@ -352,6 +521,14 @@ export function RenderPanel({
           alignment,
           margin_v: margin,
           export_compression: compressionBodyFor(nextPreset, nextCustom),
+          target_mode: storedTargetMode,
+          quality_profile: storedProfile,
+          enhancement_model: storedModel,
+          denoise: typeof storedEnhancement.denoise === "number" ? storedEnhancement.denoise : 0,
+          restoration:
+            typeof storedEnhancement.restoration === "number" ? storedEnhancement.restoration : 1,
+          allow_fallback: storedEnhancement.allow_fallback !== false,
+          temporal_stabilize: storedEnhancement.temporal_stabilize === true,
           composition: storedComposition,
           face_cam_position: storedFaceCamPosition,
           stack_split_pct: storedSplit,
@@ -373,6 +550,13 @@ export function RenderPanel({
           alignment: DEFAULT_CAPTION_ALIGNMENT,
           margin_v: DEFAULT_CAPTION_MARGIN_V,
           export_compression: compressionBodyFor("balanced", { crf: 23, audio: 128, width: 1080, fps: 30 }),
+          target_mode: "1080",
+          quality_profile: "standard",
+          enhancement_model: "auto",
+          denoise: 0,
+          restoration: 1,
+          allow_fallback: true,
+          temporal_stabilize: false,
           composition: "auto",
           face_cam_position: DEFAULT_FACE_CAM_POSITION,
           stack_split_pct: 60,
@@ -420,6 +604,11 @@ export function RenderPanel({
                     ? (base.export as Record<string, unknown>)
                     : {}),
                   compression: compressionBody,
+                  resolution_mode: targetMode,
+                  custom_width: targetInfo.custom_width,
+                  custom_height: targetInfo.custom_height,
+                  resolution,
+                  enhancement,
                   composition,
                   face_cam_position: faceCamPosition,
                   stack_split_pct: stackSplit,
@@ -455,6 +644,34 @@ export function RenderPanel({
     projectId,
     settingsSnapshot,
     stackSplit,
+    targetMode,
+    targetInfo.custom_width,
+    targetInfo.custom_height,
+    resolution,
+    enhancement,
+  ]);
+
+  useEffect(() => {
+    // A comparison is evidence for one exact configuration. Any setting that
+    // changes the frame invalidates it, including the AI Enhance+ gate.
+    setQualityPreview(null);
+    setQualityPreviewError(null);
+  }, [
+    aspect,
+    targetMode,
+    targetWidth,
+    targetHeight,
+    qualityProfile,
+    enhancementModel,
+    denoise,
+    restoration,
+    temporalStabilize,
+    composition,
+    faceCamPosition,
+    stackSplit,
+    adaptiveStack,
+    cropX,
+    cropY,
   ]);
 
   useEffect(() => {
@@ -464,7 +681,16 @@ export function RenderPanel({
         `/api/projects/${projectId}/renders/estimate`,
         {
           method: "POST",
-          body: { aspect, resolution, duration_ms: durationMs, compression: compressionBody },
+          body: {
+            aspect,
+            resolution,
+            resolution_mode: targetInfo.resolution_mode,
+            custom_width: targetInfo.custom_width,
+            custom_height: targetInfo.custom_height,
+            duration_ms: durationMs,
+            compression: compressionBody,
+            enhancement,
+          },
         },
       )
         .then((value) => {
@@ -478,7 +704,17 @@ export function RenderPanel({
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [aspect, resolution, durationMs, compressionBody, projectId]);
+  }, [
+    aspect,
+    resolution,
+    targetInfo.resolution_mode,
+    targetInfo.custom_width,
+    targetInfo.custom_height,
+    durationMs,
+    compressionBody,
+    enhancement,
+    projectId,
+  ]);
 
   function resetCaptionPosition() {
     setCaptionPosition(DEFAULT_CAPTION_POSITION);
@@ -493,12 +729,120 @@ export function RenderPanel({
   );
   const activeGamingPreset = GAMING_PRESETS.find((preset) => preset.composition === composition);
 
+  function chooseProfile(next: EnhancementProfile) {
+    setQualityProfile(next);
+    const meta =
+      capabilities?.enhancement?.profiles.find((entry) => entry.id === next) ??
+      QUALITY_PROFILE_FALLBACK[next];
+    setDenoise("default_denoise" in meta ? meta.default_denoise : meta.denoise);
+    setRestoration("default_restoration" in meta ? meta.default_restoration : meta.restoration);
+    setTemporalStabilize(next === "ai_plus");
+    setQualityPreview(null);
+    setQualityPreviewError(null);
+  }
+
+  async function installSelectedModel() {
+    if (enhancementModel === "auto") return;
+    setInstallError(null);
+    setInstallMessage("Queueing the one-time model download...");
+    try {
+      const result = await apiJson<{ job?: { id: string } | null; installed?: boolean }>(
+        `/api/enhancement/models/${enhancementModel}/install`,
+        { method: "POST" },
+      );
+      if (result.installed) {
+        setInstalledNow((current) => [...new Set([...current, enhancementModel])]);
+        setInstallMessage("The model is ready.");
+        setModelInstallJob(null);
+        return;
+      }
+      setModelInstallJob(result.job?.id ?? null);
+      setInstallMessage("Downloading weights only. Your video never leaves this machine.");
+    } catch (caught) {
+      setInstallError(caught instanceof Error ? caught.message : "The model download could not be queued.");
+      setInstallMessage(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!modelInstallJob) return;
+    let alive = true;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const payload = await apiJson<{
+            job: { state: string; message?: string | null; progress?: number | null; error_message?: string | null };
+          }>(`/api/jobs/${modelInstallJob}`);
+          if (!alive) return;
+          const job = payload.job;
+          if (job.message) setInstallMessage(job.message);
+          if (job.state === "completed") {
+            setInstalledNow((current) => [...new Set([...current, enhancementModel])]);
+            setInstallMessage("The model is ready and was benchmarked on this machine.");
+            setModelInstallJob(null);
+            window.clearInterval(timer);
+          } else if (job.state === "failed" || job.state === "cancelled") {
+            setInstallError(job.error_message || "The model download did not finish.");
+            setInstallMessage(null);
+            setModelInstallJob(null);
+            window.clearInterval(timer);
+          }
+        } catch {
+          // A transient polling failure is not a failed download.
+        }
+      })();
+    }, 1500);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [modelInstallJob, enhancementModel]);
+
+  async function runQualityPreview() {
+    setQualityPreviewBusy(true);
+    setQualityPreviewError(null);
+    try {
+      const result = await apiJson<QualityPreview>(`/api/projects/${projectId}/renders/quality-preview`, {
+        method: "POST",
+        body: {
+          candidate_id: candidateId,
+          aspect,
+          resolution,
+          resolution_mode: targetInfo.resolution_mode,
+          custom_width: targetInfo.custom_width,
+          custom_height: targetInfo.custom_height,
+          enhancement,
+          compression: compressionBody,
+          composition,
+          face_cam_position: faceCamPosition,
+          stack_split_pct: stackSplit,
+          adaptive_stack: adaptiveStack,
+          face_cam_overrides: faceCamOverrides,
+          crop_x_pct: cropX,
+          crop_y_pct: cropY,
+        },
+      });
+      setQualityPreview(result);
+      setComparisonPct(50);
+    } catch (caught) {
+      setQualityPreviewError(
+        caught instanceof Error ? caught.message : "The comparison frame could not be rendered.",
+      );
+    } finally {
+      setQualityPreviewBusy(false);
+    }
+  }
+
   async function submit() {
     setError(null);
     try {
       await onRender({
         aspect,
         resolution,
+        resolution_mode: targetInfo.resolution_mode,
+        custom_width: targetInfo.custom_width,
+        custom_height: targetInfo.custom_height,
+        enhancement,
         composition,
         face_cam_position: faceCamPosition,
         stack_split_pct: stackSplit,
@@ -561,15 +905,59 @@ export function RenderPanel({
 
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <p className="label">Resolution</p>
-            <div className="segmented">
-              <button type="button" data-active={resolution === 720} onClick={() => setResolution(720)}>
-                720p
-              </button>
-              <button type="button" data-active={resolution === 1080} onClick={() => setResolution(1080)}>
-                1080p
-              </button>
+            <p className="label">Target resolution</p>
+            <div className="grid grid-cols-2 gap-1.5">
+              {TARGET_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => setTargetMode(option.id)}
+                  aria-pressed={targetMode === option.id}
+                  className={cn(
+                    "rounded-md border px-2 py-1.5 text-left transition-colors",
+                    targetMode === option.id
+                      ? "border-ember-500/50 bg-ember-500/[0.08]"
+                      : "border-white/8 bg-black/20 hover:border-white/16",
+                  )}
+                >
+                  <span className="block text-[12px] text-mist-200">{option.label}</span>
+                  <span className="block text-[10px] text-mist-600">{option.hint}</span>
+                </button>
+              ))}
             </div>
+            {targetMode === "custom" ? (
+              <div className="grid grid-cols-2 gap-1.5">
+                <label className="space-y-0.5 text-[10.5px] text-mist-500">
+                  <span>Width</span>
+                  <input
+                    type="number"
+                    min={320}
+                    max={3840}
+                    step={2}
+                    value={targetWidth}
+                    onChange={(event) => setTargetWidth(Number(event.target.value))}
+                    className="field h-8 w-full text-[12px]"
+                  />
+                </label>
+                <label className="space-y-0.5 text-[10.5px] text-mist-500">
+                  <span>Height</span>
+                  <input
+                    type="number"
+                    min={320}
+                    max={4320}
+                    step={2}
+                    value={targetHeight}
+                    onChange={(event) => setTargetHeight(Number(event.target.value))}
+                    className="field h-8 w-full text-[12px]"
+                  />
+                </label>
+              </div>
+            ) : null}
+            <p className={cn("text-[10.5px] leading-relaxed", targetInfo.valid ? "text-mist-600" : "text-signal-bad/90")}>
+              {targetInfo.valid
+                ? `Source ${source.width}×${source.height} → output ${targetInfo.width}×${targetInfo.height} (${targetInfo.resolution_mode}).`
+                : targetInfo.error}
+            </p>
           </div>
           <div className="space-y-1.5">
             <p className="label">How to fill the frame</p>
@@ -637,12 +1025,308 @@ export function RenderPanel({
         </div>
       </div>
 
+      <div className="space-y-3 border-t border-white/6 pt-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="label flex items-center gap-1.5">
+              <Sparkles className="size-3" strokeWidth={2} />
+              Video quality
+            </p>
+            <p className="mt-1 text-[11.5px] leading-relaxed text-mist-500">
+              Enhancement is optional. It runs locally from the retained source; no video is uploaded.
+            </p>
+          </div>
+          <Badge tone={qualityProfile === "ai" || qualityProfile === "ai_plus" ? "info" : "neutral"}>
+            {profileMeta.engine}
+          </Badge>
+        </div>
+
+        <div className="grid gap-1.5 sm:grid-cols-2">
+          {capabilities?.enhancement?.profiles.map((profile) => (
+            <button
+              key={profile.id}
+              type="button"
+              onClick={() => chooseProfile(profile.id)}
+              aria-pressed={qualityProfile === profile.id}
+              className={cn(
+                "rounded-md border px-2.5 py-2 text-left transition-colors",
+                qualityProfile === profile.id
+                  ? "border-ember-500/50 bg-ember-500/[0.08]"
+                  : "border-white/8 bg-black/20 hover:border-white/16",
+              )}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="text-[12.5px] font-medium text-mist-100">{profile.label}</span>
+                {profile.uses_ai ? (
+                  <span className="text-[10px] uppercase tracking-wide text-ember-300">AI</span>
+                ) : null}
+              </span>
+              <span className="mt-0.5 block text-[11px] leading-snug text-mist-500">{profile.summary}</span>
+            </button>
+          )) ??
+            (Object.keys(QUALITY_PROFILE_FALLBACK) as EnhancementProfile[]).map((profile) => (
+              <button
+                key={profile}
+                type="button"
+                onClick={() => chooseProfile(profile)}
+                aria-pressed={qualityProfile === profile}
+                className={cn(
+                  "rounded-md border px-2.5 py-2 text-left transition-colors",
+                  qualityProfile === profile
+                    ? "border-ember-500/50 bg-ember-500/[0.08]"
+                    : "border-white/8 bg-black/20 hover:border-white/16",
+                )}
+              >
+                <span className="text-[12.5px] font-medium text-mist-100">
+                  {QUALITY_PROFILE_FALLBACK[profile].label}
+                </span>
+                <span className="mt-0.5 block text-[11px] leading-snug text-mist-500">
+                  {QUALITY_PROFILE_FALLBACK[profile].summary}
+                </span>
+              </button>
+            ))}
+        </div>
+
+        <div className="grid gap-2 rounded-md border border-white/8 bg-black/20 p-2.5 sm:grid-cols-2">
+          <div className="space-y-1">
+            <p className="text-[11px] text-mist-500">Source → target</p>
+            <p className="numeric text-[12px] text-mist-200">
+              {source.width}×{source.height} → {targetInfo.width}×{targetInfo.height}
+            </p>
+            <p className="text-[10.5px] leading-relaxed text-mist-600">
+              {qualityProfile === "standard"
+                ? "Lanczos resizing only."
+                : qualityProfile === "clean"
+                  ? `Denoise ${denoise}, then lanczos resizing. No AI model.`
+                  : `${selectedModel?.label ?? "AI model"} with ${Math.round(restoration * 100)}% model blend.`}
+              {estimate && (estimate.width !== targetInfo.width || estimate.height !== targetInfo.height)
+                ? ` Compression caps the encoded frame at ${estimate.width}×${estimate.height}.`
+                : ""}
+            </p>
+          </div>
+          <div className="space-y-1">
+            <p className="text-[11px] text-mist-500">AI acceleration</p>
+            <p className="text-[12px] text-mist-200">
+              {capabilities?.enhancement?.devices.device ?? "CPU"}
+              {capabilities?.enhancement?.devices.gpu_inference
+                ? " · GPU available"
+                : capabilities?.enhancement?.devices.device === "CPU"
+                  ? " only"
+                  : " · CPU fallback"}
+            </p>
+            <p className="text-[10.5px] leading-relaxed text-mist-600">
+              {qualityProfile === "ai" || qualityProfile === "ai_plus"
+                ? enhancementEstimate === null
+                  ? "Processing time has not been measured on this machine. The first AI preview measures it."
+                  : `≈ ${formatSeconds(enhancementEstimate)} for this clip, from measured enhancement throughput on this machine. This is an estimate.`
+                : "No AI estimate applies to this profile."}
+            </p>
+          </div>
+        </div>
+
+        {qualityProfile !== "standard" ? (
+          <div className="grid gap-2 rounded-md border border-white/8 bg-black/20 p-2.5 sm:grid-cols-2">
+            <label className="block space-y-1 text-[11px] text-mist-500">
+              <span className="flex justify-between">
+                <span>Denoise strength</span>
+                <span className="numeric text-mist-300">{denoise}</span>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={denoise}
+                onChange={(event) => setDenoise(Number(event.target.value))}
+                className="w-full accent-ember-500"
+              />
+              <span className="block text-[10.5px] text-mist-600">
+                Conservative hqdn3d before the model. 0 disables it.
+              </span>
+            </label>
+            {qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
+              <label className="block space-y-1 text-[11px] text-mist-500">
+                <span className="flex justify-between">
+                  <span>Restoration blend</span>
+                  <span className="numeric text-mist-300">{Math.round(restoration * 100)}%</span>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={Math.round(restoration * 100)}
+                  onChange={(event) => setRestoration(Number(event.target.value) / 100)}
+                  className="w-full accent-ember-500"
+                />
+                <span className="block text-[10.5px] text-mist-600">
+                  Lower keeps more of a clean resize and reduces invented texture.
+                </span>
+              </label>
+            ) : null}
+            {qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
+              <>
+                <label className="space-y-1 text-[11px] text-mist-500">
+                  <span>Model</span>
+                  <select
+                    className="field h-8 w-full text-[12px]"
+                    value={enhancementModel}
+                    onChange={(event) =>
+                      setEnhancementModel(event.target.value as EnhancementSettings["model_id"])
+                    }
+                  >
+                    <option value="auto">Auto (smallest model that covers the scale)</option>
+                    {enhancementModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                        {model.installed || installedNow.includes(model.id) ? "" : " — not installed"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="flex flex-col justify-end gap-1">
+                  <label className="flex items-start gap-2 text-[11px] text-mist-400">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-3.5 accent-ember-500"
+                      checked={temporalStabilize}
+                      onChange={(event) => setTemporalStabilize(event.target.checked)}
+                    />
+                    <span>
+                      Stabilise static HUD/text frames
+                      <span className="block text-[10.5px] text-mist-600">
+                        Averages only near-static consecutive frames. It does not interpolate motion.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 text-[11px] text-mist-400">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-3.5 accent-ember-500"
+                      checked={allowFallback}
+                      onChange={(event) => setAllowFallback(event.target.checked)}
+                    />
+                    <span>
+                      Fall back to resizing if the model cannot run
+                      <span className="block text-[10.5px] text-mist-600">
+                        The render report will say that no AI model ran.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+        {qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
+          <div className="space-y-2 rounded-md border border-white/8 bg-black/20 p-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="label">Before / after</p>
+                <p className="text-[10.5px] leading-relaxed text-mist-600">
+                  Same source frame, timestamp and composition. Drag the divider.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {!modelInstalled ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm h-7 px-2 text-[11px]"
+                    onClick={() => void installSelectedModel()}
+                    disabled={Boolean(modelInstallJob)}
+                  >
+                    <Download className="size-3" strokeWidth={2} />
+                    {modelInstallJob ? "Downloading" : "Install model"}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm h-7 px-2 text-[11px]"
+                  onClick={() => void runQualityPreview()}
+                  disabled={qualityPreviewBusy}
+                >
+                  {qualityPreviewBusy ? (
+                    <Loader2 className="size-3 animate-spin" strokeWidth={2} />
+                  ) : (
+                    <Sparkles className="size-3" strokeWidth={2} />
+                  )}
+                  {qualityPreviewBusy ? "Rendering" : "Compare a frame"}
+                </button>
+              </div>
+            </div>
+            {installMessage ? <p className="text-[10.5px] text-mist-400">{installMessage}</p> : null}
+            {installError ? <Alert tone="bad">{installError}</Alert> : null}
+            {!aiRuntimeReady ? (
+              <p className="text-[10.5px] text-signal-warn/90">
+                The AI runtime is not available in this worker. Standard and Clean still work.
+              </p>
+            ) : null}
+            {qualityPreviewError ? <Alert tone="bad">{qualityPreviewError}</Alert> : null}
+            {qualityPreview ? (
+              <div className="space-y-2">
+                <div className="relative overflow-hidden rounded border border-white/10 bg-black">
+                  <img src={qualityPreview.original} alt="Original frame" className="block w-full" />
+                  <div
+                    className="absolute inset-0 overflow-hidden"
+                    style={{ clipPath: `inset(0 0 0 ${comparisonPct}%)` }}
+                  >
+                    <img src={qualityPreview.enhanced} alt="Enhanced frame" className="block w-full" />
+                  </div>
+                  <div
+                    className="pointer-events-none absolute inset-y-0 w-px bg-ember-400/80"
+                    style={{ left: `${comparisonPct}%` }}
+                  />
+                  <span className="absolute left-2 top-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-mist-200">
+                    Enhanced
+                  </span>
+                  <span className="absolute right-2 top-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-mist-200">
+                    Original
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={comparisonPct}
+                  onChange={(event) => setComparisonPct(Number(event.target.value))}
+                  className="w-full accent-ember-500"
+                  aria-label="Before and after divider"
+                />
+                <p className="text-[10.5px] leading-relaxed text-mist-600">
+                  {qualityPreview.applied_model
+                    ? `${qualityPreview.engine} on ${qualityPreview.device ?? "this device"}. `
+                    : "No AI model ran for this comparison; the right side is conventional resizing. "}
+                  {qualityPreview.estimated_frame_seconds
+                    ? `Measured model time ≈ ${qualityPreview.estimated_frame_seconds.toFixed(2)} s per source frame. `
+                    : ""}
+                  AI can invent texture. If this frame looks worse, choose Standard.
+                </p>
+                {qualityPreview.warnings.map((warning) => (
+                  <p key={warning} className="text-[10.5px] leading-relaxed text-signal-warn/85">
+                    {warning}
+                  </p>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        <p className="text-[11px] leading-relaxed text-mist-600">
+          Upscaling reconstructs pixels; it does not restore native detail the source never captured. Captions,
+          crop, face-cam tracking and audio settings are unchanged by the enhancement profile.
+        </p>
+      </div>
+
       <div className="grid gap-4 border-t border-white/6 pt-3 lg:grid-cols-[220px_1fr]">
         <CompositionPreview
           projectId={projectId}
           candidateId={candidateId}
           aspect={aspect}
           resolution={resolution}
+          resolutionMode={targetInfo.resolution_mode}
+          customWidth={targetInfo.custom_width}
+          customHeight={targetInfo.custom_height}
           mode={composition}
           faceCamPosition={faceCamPosition}
           stackSplit={stackSplit}
@@ -1014,7 +1698,7 @@ export function RenderPanel({
                 value={customWidth}
                 onChange={(event) => setCustomWidth(Number(event.target.value))}
               >
-                {[480, 720, 1080, 1440, 1920, 2560, 3840].map((width) => (
+                {[480, 720, 1080, 1440, 1920, 2160, 2560, 3840].map((width) => (
                   <option key={width} value={width}>
                     {width}p
                   </option>
@@ -1051,9 +1735,18 @@ export function RenderPanel({
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/6 pt-3">
         <p className="text-[11.5px] text-mist-600">
-          {disabled ? disabledReason : "Rendering keeps the source untouched and writes a new MP4."}
+          {disabled
+            ? disabledReason
+            : requiresComparison
+              ? "Generate a before/after comparison before rendering AI Enhance+."
+              : "Rendering keeps the source untouched and writes a new MP4."}
         </p>
-        <button type="button" className="btn btn-primary btn-sm" onClick={submit} disabled={busy || disabled}>
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          onClick={submit}
+          disabled={busy || disabled || requiresComparison}
+        >
           {busy ? <Loader2 className="size-3.5 animate-spin" strokeWidth={2} /> : <Film className="size-3.5" strokeWidth={2} />}
           {busy ? "Queued" : "Render clip"}
         </button>
@@ -1292,6 +1985,9 @@ function CompositionPreview({
   candidateId,
   aspect,
   resolution,
+  resolutionMode,
+  customWidth,
+  customHeight,
   mode,
   faceCamPosition,
   stackSplit,
@@ -1305,7 +2001,10 @@ function CompositionPreview({
   projectId: string;
   candidateId: string;
   aspect: AspectId;
-  resolution: 720 | 1080;
+  resolution: 720 | 1080 | 1440 | 2160;
+  resolutionMode: "class" | "source" | "custom";
+  customWidth?: number;
+  customHeight?: number;
   mode: CompositionModeId;
   faceCamPosition: FaceCamPositionId;
   stackSplit: number;
@@ -1336,6 +2035,9 @@ function CompositionPreview({
             candidate_id: candidateId,
             aspect,
             resolution,
+            resolution_mode: resolutionMode,
+            custom_width: customWidth,
+            custom_height: customHeight,
             composition: mode,
             face_cam_position: faceCamPosition,
             stack_split_pct: stackSplit,
@@ -1397,6 +2099,9 @@ function CompositionPreview({
     onDetected,
     projectId,
     resolution,
+    resolutionMode,
+    customWidth,
+    customHeight,
     stackSplit,
   ]);
 

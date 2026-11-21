@@ -57,6 +57,7 @@ Key modules:
 | `providers/diarisation/` | Protocol + `UnavailableDiarisation` (honest stub) |
 | `ranking/` | Candidate generation, features, scoring, dedupe |
 | `rendering/` | Render spec validation, FFmpeg argv building, ASS subtitles, execution |
+| `enhancement/` | Profiles, model registry, ESPCN/Real-ESRGAN engines, frame streaming, cached intermediates |
 | `security/` | Path jail, filename sanitising, URL/SSRF validation, limits |
 | `storage/` | Project workspace layout and disk budget |
 
@@ -123,7 +124,16 @@ class CandidateScorerProvider(Protocol):
 class DiarisationProvider(Protocol):
     available: bool
     def diarise(self, audio: Path) -> list[SpeakerTurn]: ...
+
+class EnhancementEngine(Protocol):
+    name: str
+    device: str
+    def upscale(self, rgb: np.ndarray) -> np.ndarray: ...
 ```
+
+`EnhancementEngine` is the extension point for another compatible model. ESPCN
+and Real-ESRGAN implement it; the render service only knows about profiles,
+targets, cache identity and the returned video inputs.
 
 `UnavailableDiarisation` returns `available=False` and raises `ProviderUnavailable` if called. The capabilities endpoint reports it as unavailable, so the UI disables speaker controls instead of pretending.
 

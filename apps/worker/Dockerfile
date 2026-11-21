@@ -28,6 +28,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.
         ffmpeg \
         fonts-dejavu-core \
         gosu \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -5,6 +5,7 @@ import time
 
 from clipforge.db.repositories import Repositories
 from clipforge.discovery.service import run_discovery
+from clipforge.enhancement.install import install_model
 from clipforge.errors import JobFailed
 from clipforge.jobs.queue import JobContext
 from clipforge.media.importer import download_remote, progress_band
@@ -137,10 +138,24 @@ def handle_url_import(ctx: JobContext) -> dict:
     }
 
 
+def handle_model_install(ctx: JobContext) -> dict:
+    payload = ctx.job.get("payload") or {}
+    model_id = payload.get("model_id")
+    if not model_id:
+        raise JobFailed("invalid_job", "This job is missing the enhancement model.")
+    return install_model(
+        model_id,
+        settings=ctx.settings,
+        on_progress=lambda percent, message: ctx.on_stage("downloading_model", percent, message),
+        should_cancel=ctx.should_cancel,
+    )
+
+
 def build_handlers(repos: Repositories) -> dict:
     return {
         "analysis": handle_analysis,
         "discovery": handle_discovery,
         "render": handle_render,
         "url_import": handle_url_import,
+        "model_install": handle_model_install,
     }

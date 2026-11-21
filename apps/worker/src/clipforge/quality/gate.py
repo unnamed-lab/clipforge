@@ -78,6 +78,7 @@ def run_export_gate(
     caption_report: dict | None = None,
     overlay_report: dict | None = None,
     ending_review: dict | None = None,
+    enhancement_report: dict | None = None,
     info: MediaInfo | None = None,
 ) -> dict:
     expected_width, expected_height = spec.output_dimensions
@@ -121,22 +122,75 @@ def run_export_gate(
 
     source_width = int(source.get("width") or 0)
     source_height = int(source.get("height") or 0)
+    applied_model = (enhancement_report or {}).get("applied_model")
     if source_width and source_height:
         upscaled = expected_width > source_width or expected_height > source_height
+        if upscaled and applied_model:
+            source_detail = (
+                f"The export is {expected_width}x{expected_height} from a "
+                f"{source_width}x{source_height} source. {applied_model} reconstructed pixels; "
+                "it cannot restore detail the source never captured."
+            )
+        elif upscaled:
+            source_detail = (
+                f"The export is {expected_width}x{expected_height} from a "
+                f"{source_width}x{source_height} source; the encoder upscales and no extra "
+                "detail is recovered."
+            )
+        else:
+            source_detail = (
+                f"The {source_width}x{source_height} source covers the "
+                f"{expected_width}x{expected_height} export."
+            )
         checks.append(
             _check(
                 "source_resolution",
                 "Source resolution supports the export",
                 "warn" if upscaled else "pass",
-                (
-                    f"The export is {expected_width}x{expected_height} from a "
-                    f"{source_width}x{source_height} source; the encoder upscales and no extra "
-                    "detail is recovered."
-                )
-                if upscaled else
-                f"The {source_width}x{source_height} source covers the {expected_width}x{expected_height} export.",
+                source_detail,
                 source=[source_width, source_height],
                 export=[expected_width, expected_height],
+                model=applied_model,
+            )
+        )
+
+    enhancement = enhancement_report or {}
+    if enhancement:
+        applied = enhancement.get("applied_model")
+        if applied:
+            enhancement_status = "warn"
+            enhancement_detail = (
+                f"{enhancement.get('profile')} used {applied} on {enhancement.get('device', 'this device')}, "
+                f"scaling the source by about {enhancement.get('scale', 1):.2f}x. "
+                "AI output can invent texture and alter fine detail; compare a frame before publishing."
+            )
+        elif enhancement.get("applied") == "conventional_fallback":
+            enhancement_status = "warn"
+            enhancement_detail = (
+                "AI enhancement was requested but no model could run. The clip was rendered with "
+                "conventional resizing" + (" and denoising" if enhancement.get("denoise") else "") + "."
+            )
+        elif enhancement.get("profile") == "clean":
+            enhancement_status = "pass"
+            enhancement_detail = (
+                f"Conservative denoising (strength {enhancement.get('denoise', 0)}) and lanczos "
+                "resizing; no AI model ran."
+            )
+        else:
+            enhancement_status = "pass"
+            enhancement_detail = "Standard resizing with lanczos; no AI model ran."
+        checks.append(
+            _check(
+                "enhancement",
+                "Enhancement pipeline",
+                enhancement_status,
+                enhancement_detail,
+                profile=enhancement.get("profile"),
+                model=applied,
+                engine=enhancement.get("engine"),
+                source=enhancement.get("source"),
+                target=enhancement.get("target"),
+                intermediate=enhancement.get("intermediate"),
             )
         )
 
@@ -168,6 +222,30 @@ def run_export_gate(
             expected_ms=expected_ms,
         )
     )
+
+    if info.frame_count and target_fps:
+        expected_frames = max(1, int(round(expected_ms / 1000 * target_fps)))
+        tolerance_frames = max(2, int(expected_frames * 0.01))
+        frame_delta = abs(info.frame_count - expected_frames)
+        checks.append(
+            _check(
+                "frame_count",
+                "Frame count",
+                "pass" if frame_delta <= tolerance_frames else "warn",
+                f"{info.frame_count} frames; expected about {expected_frames} at {target_fps:.3f} fps.",
+                actual=info.frame_count,
+                expected=expected_frames,
+            )
+        )
+    else:
+        checks.append(
+            _check(
+                "frame_count",
+                "Frame count",
+                "warn",
+                "The container did not report a frame count; duration and frame rate were still checked.",
+            )
+        )
 
     target = spec.duration or {}
     target_min = int(target.get("min_ms") or 0)

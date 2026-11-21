@@ -433,7 +433,7 @@ def test_edl_separates_source_and_output_time():
     edl = spec.to_edl()
 
     # then
-    assert edl["version"] == 3
+    assert edl["version"] == 4
     first, second = edl["segments"]
     assert (first["source_start_ms"], first["source_end_ms"]) == (0, 4_000)
     assert (first["output_start_ms"], first["output_end_ms"]) == (0, 4_000)
@@ -931,7 +931,7 @@ def test_stack_chain_uses_canonical_panel_rects_and_top_order(tmp_path: Path):
     assert "crop=iw*0.6000:ih*1.0000:iw*0.1000:ih*0.0000" in graph
     assert "crop=iw*0.3000:ih*0.4000:iw*0.6600:ih*0.6000" in graph
     assert "[cam_v0][game_v0]vstack=inputs=2[composed_v0]" in graph
-    assert "force_original_aspect_ratio=increase,crop=1080:1056" in graph
+    assert "force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1056" in graph
 
 
 # --- ending review -----------------------------------------------------------

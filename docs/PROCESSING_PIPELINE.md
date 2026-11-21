@@ -196,7 +196,40 @@ Every candidate is checked and annotated:
 
 Warnings never remove a candidate automatically; the user decides.
 
-## 7. Rendering
+## 7. Enhancement (optional, before composition)
+
+The optional enhancement pass is documented in full in
+[ENHANCEMENT.md](ENHANCEMENT.md). Its position in the job is:
+
+```
+retained source -> probe -> optional hqdn3d -> AI super-resolution (per frame)
+  -> resize to a source-aspect intermediate -> video-only x264 CRF 12
+  -> existing composition graph -> audio from the retained original -> gate
+```
+
+- **Standard** uses the existing FFmpeg graph with lanczos resizing and no
+  model.
+- **Clean** adds one `hqdn3d` node before the composition split.
+- **AI Enhance / AI Enhance+** build one cached intermediate per selected
+  segment. Composition, captions and face-cam rectangles stay in normalised
+  source coordinates, so they remain valid.
+- The pass samples at the final output frame rate. A 60 fps source rendered at
+  30 fps is decoded and enhanced 30 times per second, not 60; the alternative
+  doubled CPU time and intermediate size for frames the final `fps` filter
+  would discard.
+- Audio is never written into the intermediate. The final renderer still reads
+  the original source's audio, so a second video encode cannot move it.
+- The quality preview calls the same frame function and framing chain, at the
+  same source timestamp, so a comparison differs only in pixels.
+- A missing model yields `applied_model: null` and an explicit gate warning, or
+  a structured `enhancement_model_unavailable` failure when fallback is refused.
+
+Progress is measured in decoded frames. Cancellation is checked per frame and
+partial intermediates are deleted. The cache key includes the source content
+hash, span, model version/weight hash, denoise, blend, target intermediate size
+and source fps.
+
+## 8. Rendering
 
 Spec (abridged):
 
@@ -243,7 +276,7 @@ Implementation details that matter:
 - Cancel → terminate the process, delete the partial file, job `cancelled`.
 - On success: re-probe output (streams exist, duration within ±1.5 s of expected), write `renders` row, move from tmp to `renders/`.
 
-## 8. Cleanup
+## 9. Cleanup
 
 - `tmp/` inside a project is cleared at the start of every render.
 - Deleting a project removes `data/projects/<id>` (after confirmation in the UI) and cascades DB rows.

@@ -11,6 +11,8 @@ from fastapi import APIRouter, Request
 from clipforge import __version__
 from clipforge.api.deps import get_state
 from clipforge.discovery.criteria import DISCOVERY_MOMENT_TYPES
+from clipforge.enhancement.engines import load_benchmark, runtime_devices
+from clipforge.enhancement.settings import ENHANCEMENT_PROFILES, available_models
 from clipforge.media.policy import (
     DEFAULT_QUALITY,
     MAX_PROXY_HEIGHT,
@@ -165,6 +167,7 @@ def capabilities(request: Request) -> dict:
             "available_encoders": sorted(available_encoders()),
             "gpu_required": False,
         },
+        "enhancement": _enhancement_capabilities(settings),
         "platforms": platform_summary(),
         "platform": {
             "os": platform.system(),
@@ -172,6 +175,38 @@ def capabilities(request: Request) -> dict:
             "cpu_count": os.cpu_count() or 1,
             "python": platform.python_version(),
         },
+    }
+
+
+def _enhancement_capabilities(settings) -> dict:
+    devices = runtime_devices()
+    models = available_models(settings.models_dir)
+    for model in models:
+        model["benchmark"] = load_benchmark(settings.models_dir, model["id"])
+    return {
+        "profiles": [
+            {
+                "id": profile_id,
+                "label": meta["label"],
+                "summary": meta["summary"],
+                "engine": meta["engine"],
+                "default_denoise": meta["default_denoise"],
+                "default_restoration": meta["default_restoration"],
+                "warnings": meta["warnings"],
+                "uses_ai": profile_id in {"ai", "ai_plus"},
+            }
+            for profile_id, meta in ENHANCEMENT_PROFILES.items()
+        ],
+        "models": models,
+        "devices": devices,
+        "gpu_required": False,
+        "frame_interpolation": False,
+        "model_download_requires_consent": True,
+        "notes": [
+            "AI upscaling reconstructs plausible detail; it does not recover native detail.",
+            "The bundled ESPCN models run on CPU. The optional Real-ESRGAN model is much slower on CPU.",
+            "Enhancement never changes frame rate. Interpolation is a separate, unimplemented operation.",
+        ],
     }
 
 

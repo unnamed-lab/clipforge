@@ -35,6 +35,7 @@ class MediaInfo:
     bitrate: int | None
     size_bytes: int
     raw: dict
+    frame_count: int | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -85,7 +86,8 @@ def probe(path: Path, *, timeout_seconds: float = 60, allow_audio_only: bool = F
                 ffprobe, "-v", "error", "-print_format", "json",
                 "-show_format", "-show_streams", "-show_entries",
                 "format=duration,size,bit_rate,format_name:stream=index,codec_type,codec_name,width,height,"
-                "avg_frame_rate,r_frame_rate,duration,start_time,channels,side_data_list:stream_tags=rotate",
+                "avg_frame_rate,r_frame_rate,duration,start_time,channels,nb_frames,side_data_list:"
+                "stream_tags=rotate",
                 str(path),
             ],
             timeout_seconds=timeout_seconds,
@@ -124,7 +126,7 @@ def probe(path: Path, *, timeout_seconds: float = 60, allow_audio_only: bool = F
     if video_codec and video_codec not in DECODABLE_VIDEO_CODECS:
         raise Unsupported(f"The video codec ({video_codec}) is not supported", code="unsupported_codec")
 
-    audio_codec = (audio.get("codec_name") or "").lower() or None
+    audio_codec = ((audio.get("codec_name") or "").lower() or None) if audio else None
     if audio_codec and audio_codec not in DECODABLE_AUDIO_CODECS:
         raise Unsupported(f"The audio codec ({audio_codec}) is not supported", code="unsupported_codec")
 
@@ -158,6 +160,10 @@ def probe(path: Path, *, timeout_seconds: float = 60, allow_audio_only: bool = F
         bitrate = int(fmt.get("bit_rate") or 0) or None
     except (TypeError, ValueError):
         bitrate = None
+    try:
+        frame_count = int(video.get("nb_frames")) if video and video.get("nb_frames") else None
+    except (TypeError, ValueError):
+        frame_count = None
 
     return MediaInfo(
         duration_ms=int(round(duration * 1000)),
@@ -173,4 +179,5 @@ def probe(path: Path, *, timeout_seconds: float = 60, allow_audio_only: bool = F
         bitrate=bitrate,
         size_bytes=size_bytes,
         raw={"format": fmt, "streams": streams},
+        frame_count=frame_count,
     )

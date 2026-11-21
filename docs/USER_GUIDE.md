@@ -195,7 +195,7 @@ The export panel renders the selected clip from the retained source with FFmpeg.
 | Setting | Options |
 | --- | --- |
 | Aspect | 9:16, 16:9, 1:1 |
-| Resolution | 720p, 1080p |
+| Target resolution | Preserve source, 720p, 1080p, 1440p, 4K or custom even dimensions |
 | Composition | Auto, Fill/crop, Contain, Picture-in-picture, Split/stacked, Manual |
 | Crop focus | X/Y sliders for Fill/crop and Manual |
 
@@ -205,6 +205,43 @@ The export panel renders the selected clip from the retained source with FFmpeg.
 - **Picture-in-picture** keeps the whole source over a blurred background.
 - **Split/stacked** needs two simultaneous sources; for a single source the worker degrades it to contain with a warning. The option remains selectable in the workspace; read the render warnings.
 - **Manual** in the workspace is a global crop with a chosen focus point. Per-scene composition overrides require a saved edit spec through the API; there is no per-scene override editor.
+
+### Video quality
+
+The **Video quality** section is optional. It never changes or deletes the
+original source, and it runs locally.
+
+| Profile | What it does |
+| --- | --- |
+| Standard | Lanczos resizing only. The default. |
+| Clean | Conservative `hqdn3d` denoise, then lanczos resizing. No AI. |
+| AI Enhance | ESPCN/Real-ESRGAN super-resolution at a conservative blend, then resize. |
+| AI Enhance+ | Full model strength, static-frame stabilisation, and a warning about altered texture. |
+
+- The panel shows the real source dimensions, the target, the selected engine and
+  whether GPU inference is available.
+- **Preserve source** keeps the source short side. **1080p** on a 1280×720 source
+  asks for 1920×1080; on 720×1280 it asks for 1080×1920. Other aspect ratios are
+  fitted/cropped by the composition, never stretched.
+- The compression preset can still cap the encoded frame. If it does, the panel
+  says the encoded size, and you can choose Higher/Custom to keep 1440p or 4K.
+- **Compare a frame** renders two stills from the same source timestamp and the
+  same composition decision. Drag the divider. If the enhanced side is worse,
+  switch back to Standard and render again.
+- The AI runs on CPU when no GPU provider is available. The estimate shown is
+  based on a measured benchmark on this machine; if no measurement exists, the
+  panel says so instead of inventing one.
+- Real-ESRGAN is an optional 67 MB download with an explicit button. Only model
+  weights are downloaded; your video is never uploaded.
+- A missing model either falls back to conventional resizing (with an explicit
+  warning and `applied_model: null`) or fails if you turn fallback off.
+- **AI Enhance+ requires a current comparison** before the Render button is
+  enabled. Changing the target, profile, blend or composition invalidates it,
+  because the evidence then belongs to a different frame.
+
+Upscaling reconstructs pixels. It does not restore native detail that the source
+never captured, and it can invent texture, especially at full strength. Captions,
+crop, face-cam tracking and audio settings are not changed by the profile.
 
 ### Captions
 
@@ -221,7 +258,7 @@ A sidecar SRT can be requested through the API (`captions_sidecar`). The current
 
 - **Normalise loudness** applies FFmpeg loudness normalisation.
 - Compression presets: Smallest file (CRF 28, up to 720p, 96 kbps), Balanced (CRF 23, up to 1080p, 128 kbps), Higher quality (CRF 18, full resolution, 192 kbps), or Custom CRF / audio bitrate / width / fps.
-- Compression is independent of the output resolution. A 720p render can use a high-quality encode.
+- Compression is independent of the target resolution. A 720p render can use a high-quality encode, and a 1440p target needs a preset whose cap allows it.
 
 ### Render and review
 
@@ -229,8 +266,8 @@ Submitting queues a render job; the panel polls its state. A completed render ca
 
 Before publication the worker runs an export quality gate over the actual file:
 
-- container streams (H.264 video / AAC audio), dimensions and frame rate;
-- source resolution support and actual duration versus the editorial target;
+- container streams (H.264 video / AAC audio), dimensions, frame rate and reported frame count;
+- source resolution support, the enhancement profile/model that actually ran, and actual duration versus the editorial target;
 - full decode, audio track presence and A/V sync;
 - black-frame and freeze detection;
 - caption bounds, composition warnings, logo overlay behaviour and ending review.

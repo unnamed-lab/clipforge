@@ -421,8 +421,10 @@ Prefix: `/api`
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
-| `POST` | `/api/projects/{project_id}/renders/estimate` | `{aspect, resolution, fps?, duration_ms, compression?}` | size/time estimate |
+| `POST` | `/api/projects/{project_id}/renders/estimate` | `{aspect, resolution, resolution_mode?, custom_width?, custom_height?, fps?, duration_ms, compression?, enhancement?}` | size estimate and effective encoded dimensions |
 | `POST` | `/api/projects/{project_id}/renders` | `RenderRequest` | `{render, job}` |
+| `POST` | `/api/projects/{project_id}/renders/composition-preview` | `RenderRequest` + `preview_at_ms?` | one composed JPEG frame |
+| `POST` | `/api/projects/{project_id}/renders/quality-preview` | `RenderRequest` + `preview_at_ms?` | `{original, enhanced, source, target, applied_model, …}` at the same timestamp and composition |
 | `GET` | `/api/projects/{project_id}/renders` | — | `{renders}` |
 | `GET` | `/api/renders/{render_id}` | — | `{render}` |
 | `GET` | `/api/renders/{render_id}/download` | — | MP4 attachment |
@@ -438,6 +440,18 @@ Prefix: `/api`
   "segments": null,
   "aspect": "9:16",
   "resolution": 1080,
+  "resolution_mode": "class",
+  "custom_width": null,
+  "custom_height": null,
+  "enhancement": {
+    "profile": "standard",
+    "model_id": "auto",
+    "denoise": 0,
+    "restoration": 1.0,
+    "allow_fallback": true,
+    "temporal_stabilize": false,
+    "compare_first": false
+  },
   "framing": "crop",
   "composition": "auto",
   "crop_x_pct": 50,
@@ -470,7 +484,9 @@ Prefix: `/api`
 - Provide **either** `candidate_id` **or** explicit `segments`. Both missing is a `422`.
 - `segments` is a list of `{start_ms, end_ms, role?}`; 1–40 spans, total length 2 seconds to 15 minutes. Roles are `hook`, `context`, `main`, `development`, `payoff` or `loop`. The render route ignores a `composition` key inside a segment; per-segment composition requires a saved edit spec.
 - The request model also declares `composition_overrides`, but the current render route does not apply it. Do not build a client against it.
-- `aspect`: `9:16`, `16:9`, `1:1`. `resolution`: `720` or `1080`.
+- `aspect`: `9:16`, `16:9`, `1:1`. `resolution`: `720`, `1080`, `1440` or `2160`.
+- `resolution_mode`: `class` uses the aspect ladder; `source` preserves the source short side and is returned as concrete `custom_dimensions`; `custom` requires `custom_width`/`custom_height` that match the aspect within 1% and are even. A mismatched custom size returns `422 invalid_resolution` rather than stretching.
+- `enhancement.profile`: `standard`, `clean`, `ai` or `ai_plus`. `model_id` is `auto`, `espcn-x2`, `espcn-x4` or `realesrgan-x2`. `denoise` is 0–100, `restoration` is 0–1. `allow_fallback` defaults true; when it is false and the model cannot run, the job fails with `enhancement_model_unavailable`. The render result and gate report `applied_model`; it is `null` when no AI model ran.
 - `composition`: `auto`, `crop`, `fit`, `pip`, `split` or `manual`. `split` degrades to `fit` for one source and records a warning.
 - `framing` is the legacy global switch; `composition` wins when both are present.
 - `captions` accepts only the fields the client sends; omitted fields inherit the resolved profile/preset geometry.
@@ -505,7 +521,25 @@ Prefix: `/api`
 
 `review.status` is `pass`, `warn` or `fail`. A blocking failure keeps the encoded file as a draft; `GET /renders/{id}/draft` returns it, while `download` and `stream` require a completed render.
 
-The gate measures the actual output with FFprobe/FFmpeg. It does not infer success from the filters in the command line. Checks include streams, dimensions, source resolution, frame rate, duration, editorial duration target, full decode, audio track, A/V sync, black frames, freezes, caption bounds, composition warnings, logo overlays and ending review.
+The gate measures the actual output with FFprobe/FFmpeg. It does not infer success from the filters in the command line. Checks include streams, dimensions, source resolution, enhancement profile and applied model, frame rate, reported frame count, duration, editorial duration target, full decode, audio track, A/V sync, black frames, freezes, caption bounds, composition warnings, logo overlays and ending review.
+
+### Enhancement models
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/api/enhancement/models` | — | installed models, licences, sizes, benchmarks and runtime devices |
+| `POST` | `/api/enhancement/models/{model_id}/install` | — | `{model, installed, job}`; queues a verified weight download only |
+| `DELETE` | `/api/enhancement/models/{model_id}` | — | `{model, installed: false}` for an optional model |
+| `GET` | `/api/enhancement/benchmarks` | — | measured seconds per input megapixel per model |
+
+The bundled ESPCN models need no download. `realesrgan-x2` is 67 MB and is
+installed only after this explicit call. The download streams to a `.part` file,
+checks the pinned SHA-256, then moves it into `data/models/enhancement/`.
+No user media is sent to any service by these routes.
+
+`GET /api/capabilities` includes the same model list under `enhancement`, with
+`profiles`, `devices` (`providers`, `gpu_inference`, `opencv_dnn_superres`),
+`gpu_required: false` and `frame_interpolation: false`.
 
 ---
 

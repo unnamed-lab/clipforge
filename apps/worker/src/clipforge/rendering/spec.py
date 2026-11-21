@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from clipforge.editorial.models import NarrativeRole
+from clipforge.enhancement.settings import EnhancementSettings
 from clipforge.rendering.encode import DEFAULT_PRESET, EncodeSettings, resolve_encode
 
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -30,10 +31,26 @@ DEFAULT_CAPTION_MARGIN_V = 150
 DEFAULT_CAPTION_POSITION_PCT = 80.0
 
 ASPECT_DIMENSIONS: dict[str, dict[int, tuple[int, int]]] = {
-    "9:16": {1080: (1080, 1920), 720: (720, 1280)},
-    "16:9": {1080: (1920, 1080), 720: (1280, 720)},
-    "1:1": {1080: (1080, 1080), 720: (720, 720)},
+    "9:16": {
+        720: (720, 1280),
+        1080: (1080, 1920),
+        1440: (1440, 2560),
+        2160: (2160, 3840),
+    },
+    "16:9": {
+        720: (1280, 720),
+        1080: (1920, 1080),
+        1440: (2560, 1440),
+        2160: (3840, 2160),
+    },
+    "1:1": {
+        720: (720, 720),
+        1080: (1080, 1080),
+        1440: (1440, 1440),
+        2160: (2160, 2160),
+    },
 }
+RESOLUTION_CLASSES = (720, 1080, 1440, 2160)
 
 CAPTION_PRESETS: dict[str, dict] = {
     "clean": {
@@ -231,7 +248,14 @@ class FaceCamTrack(BaseModel):
 
 class VideoSettings(BaseModel):
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
-    resolution: Literal[720, 1080] = 1080
+    resolution: Literal[720, 1080, 1440, 2160] = 1080
+    # How the concrete output size was chosen. ``class`` uses the aspect ladder,
+    # ``source`` preserves the source's short side, and ``custom`` stores exact
+    # even dimensions supplied by the client. The concrete dimensions are always
+    # in ``custom_dimensions`` for the latter two, so old readers still see a
+    # valid resolution class.
+    resolution_mode: Literal["class", "source", "custom"] = "class"
+    custom_dimensions: tuple[int, int] | None = None
     # ``framing`` is the legacy global switch. ``composition`` may be "auto"
     # (scene-aware), or a manual mode. When both are present, composition wins.
     framing: Literal["crop", "blur"] = "crop"
@@ -253,8 +277,27 @@ class VideoSettings(BaseModel):
     # split at tracked face-cam size changes; they are opt-in.
     adaptive_stack: bool = False
 
+    @model_validator(mode="after")
+    def _custom_dimensions(self) -> "VideoSettings":
+        if self.custom_dimensions is None:
+            return self
+        width, height = int(self.custom_dimensions[0]), int(self.custom_dimensions[1])
+        if width < 180 or height < 180 or width > 3840 or height > 4320:
+            raise ValueError("Custom dimensions must be between 180 and 3840 pixels on the short edge")
+        if width % 2 or height % 2:
+            raise ValueError("Custom dimensions must be even for H.264/H.265")
+        target = {"9:16": 9 / 16, "16:9": 16 / 9, "1:1": 1.0}[self.aspect]
+        if abs(width / height - target) > target * 0.01:
+            raise ValueError(
+                f"Custom dimensions {width}x{height} do not match the {self.aspect} frame. "
+                "The exporter will not stretch footage."
+            )
+        return self
+
     @property
     def dimensions(self) -> tuple[int, int]:
+        if self.custom_dimensions is not None:
+            return int(self.custom_dimensions[0]), int(self.custom_dimensions[1])
         return ASPECT_DIMENSIONS[self.aspect][int(self.resolution)]
 
     @property
@@ -388,10 +431,11 @@ class ProfileRef(BaseModel):
 
 
 class RenderSpec(BaseModel):
-    version: Literal[1, 2, 3] = 3
+    version: Literal[1, 2, 3, 4] = 4
     source_id: str
     segments: list[SegmentSpan] = Field(min_length=1, max_length=40)
     video: VideoSettings = Field(default_factory=VideoSettings)
+    enhancement: EnhancementSettings = Field(default_factory=EnhancementSettings)
     encode: EncodeSettings = Field(default_factory=lambda: resolve_encode(DEFAULT_PRESET))
     captions: CaptionSettings = Field(default_factory=CaptionSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
@@ -461,11 +505,13 @@ class RenderSpec(BaseModel):
             "target": {
                 "aspect": self.video.aspect,
                 "resolution": self.video.resolution,
+                "resolution_mode": self.video.resolution_mode,
                 "width": output_width,
                 "height": output_height,
                 "fps": self.video.fps,
                 "compression": self.encode.preset,
                 "codec": self.encode.codec,
+                "enhancement": self.enhancement.to_report(),
             },
             "segments": segments,
             "facecam_track": self.facecam_track.model_dump() if self.facecam_track else None,
@@ -481,7 +527,9 @@ class RenderSpec(BaseModel):
             "version": self.version,
             "aspect": self.video.aspect,
             "resolution": self.video.resolution,
+            "resolution_mode": self.video.resolution_mode,
             "dimensions": list(self.output_dimensions),
+            "enhancement": self.enhancement.to_report(),
             "segments": len(self.segments),
             "composition": self.video.composition or self.video.framing,
             "composition_modes": modes,
@@ -510,12 +558,92 @@ def caption_defaults(preset: str) -> dict:
     return dict(CAPTION_PRESETS.get(preset, CAPTION_PRESETS["clean"]))
 
 
+def _even_dimension(value: float) -> int:
+    rounded = max(2, int(round(value)))
+    return rounded + (rounded % 2)
+
+
+def resolution_class_for(short_side: int) -> int:
+    """The nearest supported class at or below the source short side."""
+    value = max(320, min(2160, int(short_side)))
+    choices = [item for item in RESOLUTION_CLASSES if item <= value]
+    return choices[-1] if choices else 720
+
+
+def preserve_dimensions(source_width: int, source_height: int, aspect: str) -> tuple[int, int]:
+    """Output dimensions that keep the source's short side and the target aspect.
+
+    A 1280x720 source in a 16:9 frame stays 1280x720. The same source in a 9:16
+    frame becomes 720x1280: the short side is preserved, so the composition does
+    not invent extra resolution simply by cropping to portrait. Nothing is
+    stretched.
+    """
+    target = {"9:16": 9 / 16, "16:9": 16 / 9, "1:1": 1.0}[aspect]
+    short = max(320, min(2160, min(int(source_width), int(source_height))))
+    if target >= 1:
+        height = short
+        width = _even_dimension(short * target)
+    else:
+        width = short
+        height = _even_dimension(short / target)
+    return width, height
+
+
+def normalise_target(
+    *,
+    aspect: str,
+    resolution: int,
+    resolution_mode: str,
+    source_width: int | None,
+    source_height: int | None,
+    custom_width: int | None = None,
+    custom_height: int | None = None,
+) -> dict:
+    """Resolve a client target into ``VideoSettings`` fields.
+
+    Raises ``ValueError`` with a user-facing sentence for a custom size that
+    would stretch the frame or cannot be encoded.
+    """
+    if resolution_mode not in {"class", "source", "custom"}:
+        raise ValueError("Resolution mode must be class, source or custom")
+    if resolution not in RESOLUTION_CLASSES:
+        raise ValueError(f"Resolution class must be one of: {', '.join(map(str, RESOLUTION_CLASSES))}")
+    if resolution_mode == "source":
+        if not source_width or not source_height:
+            raise ValueError("The source resolution is unknown, so it cannot be preserved")
+        width, height = preserve_dimensions(source_width, source_height, aspect)
+        return {
+            "resolution": resolution_class_for(min(source_width, source_height)),
+            "resolution_mode": "source",
+            "custom_dimensions": (width, height),
+        }
+    if resolution_mode == "custom":
+        if not custom_width or not custom_height:
+            raise ValueError("Custom output needs both a width and a height")
+        # VideoSettings validates even size, range and aspect below; doing it
+        # here keeps the error on the request rather than deep in a model.
+        VideoSettings(
+            aspect=aspect,
+            resolution=resolution,
+            resolution_mode="custom",
+            custom_dimensions=(int(custom_width), int(custom_height)),
+        )
+        return {
+            "resolution": resolution,
+            "resolution_mode": "custom",
+            "custom_dimensions": (int(custom_width), int(custom_height)),
+        }
+    return {"resolution": resolution, "resolution_mode": "class", "custom_dimensions": None}
+
+
 def build_spec(
     *,
     source_id: str,
     segments: list[dict],
     aspect: str = "9:16",
     resolution: int = 1080,
+    resolution_mode: str = "class",
+    custom_dimensions: tuple[int, int] | list[int] | None = None,
     framing: str = "crop",
     composition: str | None = None,
     compression: EncodeSettings | dict | None = None,
@@ -531,6 +659,7 @@ def build_spec(
     caption_overrides: dict | None = None,
     captions_burn_in: bool = True,
     captions_sidecar: bool = False,
+    enhancement: EnhancementSettings | dict | None = None,
     audio: dict | None = None,
     logo: dict | None = None,
     fps: int | None = None,
@@ -545,12 +674,16 @@ def build_spec(
 ) -> RenderSpec:
     defaults = caption_defaults(caption_preset) if caption_preset != "custom" else {}
     payload = {
-        "version": 3,
+        "version": 4,
         "source_id": source_id,
         "segments": segments,
         "video": {
             "aspect": aspect,
             "resolution": resolution,
+            "resolution_mode": resolution_mode,
+            "custom_dimensions": (
+                list(custom_dimensions) if custom_dimensions is not None else None
+            ),
             "framing": framing,
             "composition": composition,
             "crop_x_pct": crop_x_pct,
@@ -568,6 +701,13 @@ def build_spec(
             else resolve_encode(DEFAULT_PRESET).model_dump()
             if compression is None
             else compression
+        ),
+        "enhancement": (
+            enhancement.model_dump()
+            if isinstance(enhancement, EnhancementSettings)
+            else enhancement
+            if enhancement is not None
+            else {}
         ),
         "captions": {
             "enabled": captions_enabled,

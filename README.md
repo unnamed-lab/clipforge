@@ -16,7 +16,7 @@ Clipforge runs as two local processes: a Next.js web app and a Python worker tha
 4. **Plan the edit** with a duration target, hook, narrative strategy, pacing profile and a source-to-timeline map. Reordered plans are not applied silently.
 5. **Review and trim** against transcript snap points, check a proposed ending, keep or reject candidates, and see exactly why each score was given.
 6. **Package** the clip with grounded titles, descriptions, hashtags and keywords, per-field regeneration, a title rubric and an optional trend check.
-7. **Export** 9:16, 16:9 or 1:1 video at 720p/1080p with scene-aware composition, burned-in or sidecar captions, compression presets, audio normalisation and a measured export quality gate.
+7. **Export** 9:16, 16:9 or 1:1 video at 720p–4K with scene-aware composition, burned-in or sidecar captions, compression presets, audio normalisation, optional local video enhancement (Standard/Clean/AI Enhance/AI Enhance+), before/after frame comparison and a measured export quality gate.
 
 The score in the editor is an **editorial estimate from transcript features, not a prediction of reach or engagement**.
 
@@ -32,7 +32,7 @@ The score in the editor is an **editorial estimate from transcript features, not
 | Editorial planning | Short/Standard/Extended/Custom duration targets; hook selection and review; Automatic, Cold open, In medias res, Result first, Chronological, Question-answer, Story escalation, Reaction-led and Manual strategies; pacing profiles; retention plan; timeline with warnings. |
 | Editing | Video preview bounded to the clip; trim scrubber; in/out nudge and transcript snapping; save/reset trims; ending review with alternatives; keep/reject/restore candidates; title and decision edits. The selected hook and editorial reasoning are shown but not edited in the workspace. |
 | Captions | Burn-in and/or SRT sidecar; four built-in presets (`clean`, `large`, `minimal`, `branded`) plus an API `custom` preset; bundled fonts; position, alignment, margin, background and word highlight; measured caption bounds reported by the quality gate. |
-| Export | 9:16 / 16:9 / 1:1; 720p / 1080p; Auto, Fill/crop, Contain, Picture-in-picture or Manual composition; per-scene composition decisions with reasons and warnings; hook and editorial application; compression presets or custom CRF/bitrate/width/fps; optional logo overlay; persistent render history. |
+| Export | 9:16 / 16:9 / 1:1; preserve-source, 720p, 1080p, 1440p, 4K or custom even dimensions; Auto, Fill/crop, Contain, Picture-in-picture or Manual composition; per-scene composition decisions with reasons and warnings; hook and editorial application; Standard/Clean/AI Enhance/AI Enhance+ video quality profiles with a same-frame before/after comparison; compression presets or custom CRF/bitrate/width/fps; optional logo overlay; persistent render history. |
 | Packaging | Titles across eight angles; title rubric and rejection of unsupported claims; description, hashtags, keywords, thumbnail text; field-level regeneration that preserves approved fields; optional YouTube/Twitch/trend providers, all reported honestly when unavailable. |
 | Quality gate | FFprobe/FFmpeg evidence for streams, dimensions, source resolution, frame rate, duration and duration target, full decode, audio track, A/V sync, black frames, freezes, caption bounds, composition warnings, logo overlays and ending review. A blocking failure keeps the draft for inspection and does not publish it as a finished render. |
 | Operations | Persistent SQLite job queue with stages, progress, cancellation, retry and dedupe; local or Supabase Storage; disk-space guards; health and capability reporting; Docker Compose and Render Blueprint. |
@@ -284,6 +284,7 @@ data/                  Runtime data (git-ignored)
 | --- | --- |
 | [Documentation index](docs/README.md) | What each document covers and which ones are dated records. |
 | [User guide](docs/USER_GUIDE.md) | End-to-end workflow, editor controls and export behaviour. |
+| [Video enhancement](docs/ENHANCEMENT.md) | Root-cause audit, model/licence evaluation, pipeline order, measured CPU throughput and remaining limits. |
 | [API reference](docs/API.md) | Worker routes, authentication, job model and examples. |
 | [Known limitations](docs/KNOWN_LIMITATIONS.md) | What is deliberately absent, and what "verified" means here. |
 | [Architecture](docs/ARCHITECTURE.md) | Service boundaries, data model, job model and security rules. |

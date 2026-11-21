@@ -550,7 +550,7 @@ export function ClipEditor({
       />
 
       <PackagingPanel
-        key={candidate.id}
+        key={`packaging-${candidate.id}`}
         projectId={projectId}
         candidate={candidate}
         onCandidate={onCandidate}
@@ -612,9 +612,10 @@ export function ClipEditor({
       </section>
 
       <RenderPanel
-        key={candidate.id}
+        key={`render-${candidate.id}`}
         projectId={projectId}
         candidateId={candidate.id}
+        source={source}
         capabilities={capabilities}
         durationMs={durationMs}
         renders={candidateRenders}

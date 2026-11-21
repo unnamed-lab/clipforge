@@ -61,6 +61,20 @@ No licence file is present in the repository yet. Treat the source as all rights
 - **Logo and music are profile/API concepts.** The workspace export panel exposes composition, captions, normalisation and compression. Logo overlays, music beds, ducking and fades require the render API with an uploaded asset.
 - **Boundary review is a suggestion.** It detects trailing shots and proposes alternative out points. It can miss a bad ending or propose an unnecessary cut. Nothing is applied automatically.
 
+## Video enhancement
+
+- **AI is slow on CPU.** The bundled ESPCN model takes roughly 35–85 seconds per second of 720p footage on the four-core reference laptop. Real-ESRGAN is roughly 100 seconds per frame, so it is optional and warned about. The UI reports a measured estimate, not a promise.
+- **No GPU inference by default.** ESPCN uses OpenCV's CPU DNN. Real-ESRGAN can use CUDA or DirectML only if the installed ONNX Runtime provides that provider; no CUDA runtime ships with Clipforge.
+- **Upscaling is reconstruction, not recovery.** AI can invent texture and alter fine detail. A 1080p export from a 720p source is not native 1080p. The gate marks every AI render as a warning and names the model.
+- **No face restoration model.** GFPGAN/CodeFormer are not integrated because they can change identity-relevant details. Faces are handled by the general model at a conservative blend, and Clean is often the more natural choice.
+- **No temporal super-resolution or frame interpolation.** Frame rate is preserved by default. If the export caps the rate (for example a 60 fps source exported at 30 fps), enhancement samples at the final output rate so it does not process frames the encoder discards. AI Enhance+ only averages near-static consecutive frames; it does not interpolate motion and resets on a scene cut.
+- **One model per render.** There is no per-scene model switching or automatic face/text region routing.
+- **Comparison is a still frame.** The before/after preview proves timestamp, crop and composition parity. It does not prove full-motion stability; review the exported clip.
+- **Real-ESRGAN needs a download.** The 67 MB model is not bundled. A first AI run with that model selected and no network fails or falls back, with an explicit message.
+- **Intermediate encode is CRF 12, not lossless.** This bounds disk and time and adds a small generation loss.
+- **Enhancement cache is bounded at 2 GiB per project.** Old segments are pruned; the cache key prevents stale reuse but cannot keep everything.
+- **URL imports still default to 720p.** Changing the default is a bandwidth decision, not part of enhancement. Choose 1080p/Higher/Best at import when the source publishes it.
+
 ---
 
 ## Packaging and research
@@ -116,6 +130,11 @@ No licence file is present in the repository yet. Treat the source as all rights
 4. Shared package tests (Vitest).
 5. Web tests (Vitest).
 6. Worker tests with `pytest -m "not slow"`.
+
+The worker suite includes real FFmpeg render checks and real bundled-ESPCN
+inference (`tests/test_enhancement.py`, `tests/test_enhancement_api.py`). They
+are marked `integration`; the default worker test command runs them because
+they do not need a downloaded model or a GPU.
 
 `--build` adds the production Next.js build. `--docker` adds the Compose image build and smoke test. `--slow` includes worker tests that run real faster-whisper inference.
 
