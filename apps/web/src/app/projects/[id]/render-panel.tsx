@@ -1165,8 +1165,8 @@ export function RenderPanel({
               </label>
             ) : (
               <p className="self-end pb-1 text-[10.5px] leading-relaxed text-mist-600">
-                Fast mode fixes denoise at 0 and the model blend at 100%. It writes the model's
-                native-size intermediate for a quicker encode.
+                Fast mode fixes denoise at 0 and the model blend at 100%. It writes the native
+                model-size intermediate for a quicker encode.
               </p>
             )}
             {qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
