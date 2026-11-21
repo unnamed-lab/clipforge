@@ -614,6 +614,7 @@ export function ClipEditor({
       <RenderPanel
         key={candidate.id}
         projectId={projectId}
+        candidateId={candidate.id}
         capabilities={capabilities}
         durationMs={durationMs}
         renders={candidateRenders}
