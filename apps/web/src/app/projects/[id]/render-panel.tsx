@@ -221,6 +221,7 @@ export function RenderPanel({
   const [targetMode, setTargetMode] = useState<TargetMode>("1080");
   const [targetWidth, setTargetWidth] = useState(source.width || 1080);
   const [targetHeight, setTargetHeight] = useState(source.height || 1920);
+  const [exportFps, setExportFps] = useState<number>(source.fps ? Math.round(source.fps) : 30);
   const [qualityProfile, setQualityProfile] = useState<EnhancementProfile>("standard");
   const [enhancementModel, setEnhancementModel] = useState<EnhancementSettings["model_id"]>("auto");
   const [denoise, setDenoise] = useState(0);
@@ -310,7 +311,8 @@ export function RenderPanel({
       ...QUALITY_PROFILE_FALLBACK[qualityProfile],
       id: qualityProfile,
       warnings: [],
-      uses_ai: qualityProfile === "ai" || qualityProfile === "ai_plus",
+      uses_ai:
+        qualityProfile === "ai_fast" || qualityProfile === "ai" || qualityProfile === "ai_plus",
       default_denoise: QUALITY_PROFILE_FALLBACK[qualityProfile].denoise,
       default_restoration: QUALITY_PROFILE_FALLBACK[qualityProfile].restoration,
     };
@@ -320,9 +322,11 @@ export function RenderPanel({
     targetInfo.height / Math.max(1, source.height || targetInfo.height),
   );
   const autoModelId: EnhancementSettings["model_id"] =
-    (qualityProfile === "ai_plus" && neededScale > 1.35) || neededScale > 2.25
-      ? "espcn-x4"
-      : "espcn-x2";
+    qualityProfile === "ai_fast"
+      ? "espcn-x2"
+      : (qualityProfile === "ai_plus" && neededScale > 1.35) || neededScale > 2.25
+        ? "espcn-x4"
+        : "espcn-x2";
   const estimateModelId = enhancementModel !== "auto" ? enhancementModel : autoModelId;
   const estimateModel = enhancementModels.find((model) => model.id === estimateModelId);
   const selectedModel = enhancementModels.find((model) => model.id === enhancementModel);
@@ -341,7 +345,7 @@ export function RenderPanel({
     sourceWidth: source.width || targetInfo.width,
     sourceHeight: source.height || targetInfo.height,
     durationMs,
-    fps: source.fps,
+    fps: exportFps,
     maxFps: customFps,
   });
 
@@ -448,7 +452,9 @@ export function RenderPanel({
         const storedCropX = typeof resolvedExport.crop_x_pct === "number" ? resolvedExport.crop_x_pct : 50;
         const storedCropY = typeof resolvedExport.crop_y_pct === "number" ? resolvedExport.crop_y_pct : 50;
         const storedAdaptive = resolvedExport.adaptive_stack === true;
+        const storedFps = typeof resolvedExport.fps === "number" ? resolvedExport.fps : 30;
         const storedOverrides = normalizeFaceCamOverrides(resolvedExport.face_cam_overrides);
+        setExportFps(storedFps);
         setComposition(storedComposition);
         setFaceCamPosition(storedFaceCamPosition);
         setStackSplit(storedSplit);
@@ -688,6 +694,7 @@ export function RenderPanel({
             custom_width: targetInfo.custom_width,
             custom_height: targetInfo.custom_height,
             duration_ms: durationMs,
+            fps: exportFps,
             compression: compressionBody,
             enhancement,
           },
@@ -711,6 +718,7 @@ export function RenderPanel({
     targetInfo.custom_width,
     targetInfo.custom_height,
     durationMs,
+    exportFps,
     compressionBody,
     enhancement,
     projectId,
@@ -812,6 +820,7 @@ export function RenderPanel({
           custom_width: targetInfo.custom_width,
           custom_height: targetInfo.custom_height,
           enhancement,
+          fps: exportFps,
           compression: compressionBody,
           composition,
           face_cam_position: faceCamPosition,
@@ -843,6 +852,7 @@ export function RenderPanel({
         custom_width: targetInfo.custom_width,
         custom_height: targetInfo.custom_height,
         enhancement,
+        fps: exportFps,
         composition,
         face_cam_position: faceCamPosition,
         stack_split_pct: stackSplit,
@@ -1036,7 +1046,13 @@ export function RenderPanel({
               Enhancement is optional. It runs locally from the retained source; no video is uploaded.
             </p>
           </div>
-          <Badge tone={qualityProfile === "ai" || qualityProfile === "ai_plus" ? "info" : "neutral"}>
+          <Badge
+            tone={
+              qualityProfile === "ai_fast" || qualityProfile === "ai" || qualityProfile === "ai_plus"
+                ? "info"
+                : "neutral"
+            }
+          >
             {profileMeta.engine}
           </Badge>
         </div>
@@ -1091,14 +1107,16 @@ export function RenderPanel({
           <div className="space-y-1">
             <p className="text-[11px] text-mist-500">Source → target</p>
             <p className="numeric text-[12px] text-mist-200">
-              {source.width}×{source.height} → {targetInfo.width}×{targetInfo.height}
+              {source.width}×{source.height} → {targetInfo.width}×{targetInfo.height} · {exportFps} fps
             </p>
             <p className="text-[10.5px] leading-relaxed text-mist-600">
               {qualityProfile === "standard"
                 ? "Lanczos resizing only."
                 : qualityProfile === "clean"
                   ? `Denoise ${denoise}, then lanczos resizing. No AI model.`
-                  : `${selectedModel?.label ?? "AI model"} with ${Math.round(restoration * 100)}% model blend.`}
+                  : qualityProfile === "ai_fast"
+                    ? `${selectedModel?.label ?? "ESPCN 2×"}, no denoise or blend. Fast mode may let composition lanczos the model result to the target.`
+                    : `${selectedModel?.label ?? "AI model"} with ${Math.round(restoration * 100)}% model blend.`}
               {estimate && (estimate.width !== targetInfo.width || estimate.height !== targetInfo.height)
                 ? ` Compression caps the encoded frame at ${estimate.width}×${estimate.height}.`
                 : ""}
@@ -1115,7 +1133,7 @@ export function RenderPanel({
                   : " · CPU fallback"}
             </p>
             <p className="text-[10.5px] leading-relaxed text-mist-600">
-              {qualityProfile === "ai" || qualityProfile === "ai_plus"
+              {qualityProfile === "ai" || qualityProfile === "ai_plus" || qualityProfile === "ai_fast"
                 ? enhancementEstimate === null
                   ? "Processing time has not been measured on this machine. The first AI preview measures it."
                   : `≈ ${formatSeconds(enhancementEstimate)} for this clip, from measured enhancement throughput on this machine. This is an estimate.`
@@ -1126,24 +1144,31 @@ export function RenderPanel({
 
         {qualityProfile !== "standard" ? (
           <div className="grid gap-2 rounded-md border border-white/8 bg-black/20 p-2.5 sm:grid-cols-2">
-            <label className="block space-y-1 text-[11px] text-mist-500">
-              <span className="flex justify-between">
-                <span>Denoise strength</span>
-                <span className="numeric text-mist-300">{denoise}</span>
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={5}
-                value={denoise}
-                onChange={(event) => setDenoise(Number(event.target.value))}
-                className="w-full accent-ember-500"
-              />
-              <span className="block text-[10.5px] text-mist-600">
-                Conservative hqdn3d before the model. 0 disables it.
-              </span>
-            </label>
+            {qualityProfile !== "ai_fast" ? (
+              <label className="block space-y-1 text-[11px] text-mist-500">
+                <span className="flex justify-between">
+                  <span>Denoise strength</span>
+                  <span className="numeric text-mist-300">{denoise}</span>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={denoise}
+                  onChange={(event) => setDenoise(Number(event.target.value))}
+                  className="w-full accent-ember-500"
+                />
+                <span className="block text-[10.5px] text-mist-600">
+                  Conservative hqdn3d before the model. 0 disables it.
+                </span>
+              </label>
+            ) : (
+              <p className="self-end pb-1 text-[10.5px] leading-relaxed text-mist-600">
+                Fast mode fixes denoise at 0 and the model blend at 100%. It writes the model's
+                native-size intermediate for a quicker encode.
+              </p>
+            )}
             {qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
               <label className="block space-y-1 text-[11px] text-mist-500">
                 <span className="flex justify-between">
@@ -1164,7 +1189,7 @@ export function RenderPanel({
                 </span>
               </label>
             ) : null}
-            {qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
+            {qualityProfile === "ai" || qualityProfile === "ai_plus" || qualityProfile === "ai_fast" ? (
               <>
                 <label className="space-y-1 text-[11px] text-mist-500">
                   <span>Model</span>
@@ -1219,7 +1244,7 @@ export function RenderPanel({
           </div>
         ) : null}
 
-        {qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
+        {qualityProfile === "ai_fast" || qualityProfile === "ai" || qualityProfile === "ai_plus" ? (
           <div className="space-y-2 rounded-md border border-white/8 bg-black/20 p-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>

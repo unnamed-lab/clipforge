@@ -34,7 +34,8 @@ directory, FFmpeg, Python, or the token file when `CLIPFORGE_WORKER_TOKEN` is se
 | `CLIPFORGE_WHISPER_MODEL` | `small` | no | `tiny`, `base`, `small`, `medium`. `base` is the hosted default. |
 | `CLIPFORGE_WHISPER_DEVICE` | `cpu` | no | CPU only; no GPU assumption. |
 | `CLIPFORGE_WHISPER_COMPUTE_TYPE` | `int8` | no | CPU quantisation. |
-| `CLIPFORGE_ENHANCEMENT_DEVICE` | `auto` | no | ONNX Runtime provider preference for the optional Real-ESRGAN model: `auto`, `cpu`, `cuda` or `dml`. Falls back to CPU. ESPCN always runs through OpenCV on CPU. |
+| `CLIPFORGE_ENHANCEMENT_DEVICE` | `auto` | no | ONNX Runtime provider preference for the optional Real-ESRGAN model: `auto`, `cpu`, `cuda` or `dml`. Falls back to CPU. ESPCN runs through OpenCV on CPU. |
+| `CLIPFORGE_OPENCV_THREADS` | `min(6, logical CPUs)` | no | OpenCV DNN worker threads for ESPCN. Six measured faster than eight on a 4-core/8-thread CPU. |
 | `CLIPFORGE_LLM_ENABLED` | `false` | no | Opt-in external rescoring. Transcript text leaves the device only if enabled and consented. |
 | `CLIPFORGE_LLM_BASE_URL` | empty | if LLM enabled | OpenAI-compatible endpoint. |
 | `CLIPFORGE_LLM_MODEL` | empty | if LLM enabled | Model name at that endpoint. |

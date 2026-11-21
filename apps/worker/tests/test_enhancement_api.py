@@ -203,3 +203,4 @@ def test_capabilities_report_the_bundled_models_and_cpu_fallback(client):
     assert {model["id"] for model in enhancement["models"]} >= {"espcn-x2", "espcn-x4", "realesrgan-x2"}
     assert all(model["licence"] for model in enhancement["models"])
     assert enhancement["profiles"][0]["id"] == "standard"
+    assert "ai_fast" in {profile["id"] for profile in enhancement["profiles"]}

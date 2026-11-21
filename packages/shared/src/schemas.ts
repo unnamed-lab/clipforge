@@ -1036,7 +1036,7 @@ export const compressionChoiceSchema = z
   .passthrough();
 export type CompressionChoice = z.infer<typeof compressionChoiceSchema>;
 
-export const enhancementProfileSchema = z.enum(["standard", "clean", "ai", "ai_plus"]);
+export const enhancementProfileSchema = z.enum(["standard", "clean", "ai_fast", "ai", "ai_plus"]);
 export type EnhancementProfile = z.infer<typeof enhancementProfileSchema>;
 
 export const enhancementModelIdSchema = z.enum([

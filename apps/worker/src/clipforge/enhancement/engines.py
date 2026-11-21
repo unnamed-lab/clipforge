@@ -123,6 +123,12 @@ class EspcnEngine:
 
     def _load(self):
         try:
+            # OpenCV defaults to every logical CPU. On a 4-core/8-thread laptop
+            # four workers measured faster than eight because the model stops
+            # fighting itself for hyperthreads.
+            default_threads = min(6, os.cpu_count() or 1)
+            threads = int(os.environ.get("CLIPFORGE_OPENCV_THREADS", default_threads))
+            cv2.setNumThreads(max(1, min(32, threads)))
             sr = cv2.dnn_superres.DnnSuperResImpl_create()
             sr.readModel(str(self.path))
             sr.setModel("espcn", int(self.model.scale))

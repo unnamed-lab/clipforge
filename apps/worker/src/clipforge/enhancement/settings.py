@@ -15,7 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-EnhancementProfile = Literal["standard", "clean", "ai", "ai_plus"]
+EnhancementProfile = Literal["standard", "clean", "ai_fast", "ai", "ai_plus"]
 ModelId = Literal["auto", "espcn-x2", "espcn-x4", "realesrgan-x2"]
 
 DEFAULT_MODEL_ID = "espcn-x2"
@@ -39,6 +39,19 @@ ENHANCEMENT_PROFILES: dict[str, dict] = {
         "default_restoration": 1.0,
         "warnings": [
             "Denoising trades a little fine texture for fewer compression artefacts. It does not add detail.",
+        ],
+    },
+    "ai_fast": {
+        "label": "AI Enhance Fast",
+        "summary": "One-pass ESPCN 2x, no denoise or blend, and a faster intermediate encode.",
+        "engine": "ESPCN 2x + fast encode",
+        "default_denoise": 0,
+        "default_restoration": 1.0,
+        "warnings": [
+            "Fast AI skips denoising and blending to save CPU time.",
+            "If the target is larger than the model output, composition upscales the model result with lanczos. This can look softer than AI Enhance.",
+            "AI upscaling can invent plausible texture. It cannot restore detail the source never captured.",
+            "Frame rate is kept unchanged; this profile does not interpolate frames.",
         ],
     },
     "ai": {
@@ -189,7 +202,7 @@ class EnhancementSettings(BaseModel):
 
     @property
     def uses_ai(self) -> bool:
-        return self.profile in {"ai", "ai_plus"}
+        return self.profile in {"ai_fast", "ai", "ai_plus"}
 
     def to_report(self) -> dict:
         return self.model_dump()
@@ -220,6 +233,10 @@ def resolve_model(
     """
     if settings.model_id != "auto":
         return model_by_id(settings.model_id)
+    if settings.profile == "ai_fast":
+        # Fast is explicitly a 2x path. Choosing 4x would multiply both time
+        # and intermediate size; a user can still select it explicitly.
+        return MODELS["espcn-x2"]
     needed = max(
         target_width / max(1, source_width),
         target_height / max(1, source_height),
@@ -236,6 +253,7 @@ def intermediate_dimensions(
     target_width: int,
     target_height: int,
     model: ModelSpec,
+    native: bool = False,
 ) -> tuple[int, int]:
     """Full-frame intermediate size that needs no further upscale in composition.
 
@@ -248,7 +266,10 @@ def intermediate_dimensions(
         target_width / max(1, source_width),
         target_height / max(1, source_height),
     )
-    factor = max(float(model.scale), needed)
+    # ``native`` keeps the model's own output size. The fast profile uses it so
+    # it does not pay for an extra high-resolution resize before encoding; the
+    # composition performs the final scale in the same graph it already needs.
+    factor = float(model.scale) if native else max(float(model.scale), needed)
     width = _even(source_width * factor)
     height = _even(source_height * factor)
     edge_scale = min(

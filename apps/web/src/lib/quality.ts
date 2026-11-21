@@ -29,6 +29,13 @@ export const QUALITY_PROFILE_FALLBACK: Record<
     denoise: 30,
     restoration: 1,
   },
+  ai_fast: {
+    label: "AI Enhance Fast",
+    summary: "One-pass ESPCN 2×, no denoise or blend, and a faster intermediate encode.",
+    engine: "ESPCN 2× + fast encode",
+    denoise: 0,
+    restoration: 1,
+  },
   ai: {
     label: "AI Enhance",
     summary: "A tested super-resolution model at a conservative blend, then a high-quality resize.",
@@ -158,14 +165,17 @@ export function estimatedEnhancementSeconds(input: {
   fps: number | null | undefined;
   maxFps?: number | null;
 }): number | null {
-  if (input.profile !== "ai" && input.profile !== "ai_plus") return 0;
+  if (input.profile !== "ai_fast" && input.profile !== "ai" && input.profile !== "ai_plus") {
+    return 0;
+  }
   const perMegapixel = input.benchmarkSecondsPerMegapixel;
   if (!perMegapixel || perMegapixel <= 0) return null;
   const fps = Math.max(1, Math.min(Number(input.maxFps || input.fps || 30), 60));
   const frames = Math.max(1, Math.round((input.durationMs / 1000) * fps));
   const megapixels = (input.sourceWidth * input.sourceHeight) / 1_000_000;
-  // Measured model time plus the streaming decode/encode and blend overhead.
-  return Math.round(frames * megapixels * perMegapixel * 1.25);
+  // Fast AI has no denoise/blend and writes a smaller native-size intermediate.
+  const overhead = input.profile === "ai_fast" ? 1.10 : 1.25;
+  return Math.round(frames * megapixels * perMegapixel * overhead);
 }
 
 export function formatSeconds(value: number | null): string {

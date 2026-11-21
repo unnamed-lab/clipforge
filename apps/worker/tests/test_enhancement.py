@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from clipforge.enhancement.engines import ModelUnavailable, reset_engines
-from clipforge.enhancement.service import prepare_enhancement
+from clipforge.enhancement.service import prepare_enhancement, resolve_plan
 from clipforge.enhancement.settings import (
     MODELS,
     EnhancementSettings,
@@ -39,6 +39,72 @@ def test_ai_profile_applies_conservative_defaults():
     assert settings.denoise == 15
     assert settings.restoration == 0.9
     assert settings.uses_ai is True
+
+
+def test_fast_ai_profile_skips_denoise_and_blend():
+    # given / when
+    settings = EnhancementSettings(profile="ai_fast")
+
+    # then
+    assert settings.uses_ai is True
+    assert settings.denoise == 0
+    assert settings.restoration == 1.0
+    assert settings.temporal_stabilize is False
+
+
+def test_fast_ai_always_uses_the_2x_model_on_auto():
+    # given
+    settings = EnhancementSettings(profile="ai_fast", model_id="auto")
+
+    # when
+    model = resolve_model(
+        settings,
+        source_width=1280,
+        source_height=720,
+        target_width=1080,
+        target_height=1920,
+    )
+
+    # then
+    assert model.id == "espcn-x2"
+
+
+def test_fast_ai_intermediate_is_the_model_native_size():
+    # given
+    model = MODELS["espcn-x2"]
+
+    # when
+    width, height = intermediate_dimensions(
+        source_width=1280,
+        source_height=720,
+        target_width=1080,
+        target_height=1920,
+        model=model,
+        native=True,
+    )
+
+    # then
+    assert (width, height) == (2560, 1440)
+
+
+def test_fast_ai_plan_uses_the_fast_intermediate_encoder(tmp_path):
+    # given
+    spec = build_spec(
+        source_id="src",
+        segments=[{"start_ms": 0, "end_ms": 2000}],
+        aspect="9:16",
+        resolution=1080,
+        enhancement=EnhancementSettings(profile="ai_fast"),
+    )
+
+    # when
+    plan = resolve_plan(spec, source_width=1280, source_height=720)
+
+    # then
+    assert plan.model is not None and plan.model.id == "espcn-x2"
+    assert plan.intermediate == (2560, 1440)
+    assert plan.intermediate_crf == 16
+    assert plan.intermediate_preset == "ultrafast"
 
 
 def test_ai_plus_defaults_to_static_frame_stabilisation():

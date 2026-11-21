@@ -97,6 +97,28 @@ describe("quality helpers", () => {
     expect(seconds).toBe(411);
   });
 
+  it("estimates Fast AI with less pipeline overhead than full AI", () => {
+    const fast = estimatedEnhancementSeconds({
+      profile: "ai_fast",
+      benchmarkSecondsPerMegapixel: 1.19,
+      sourceWidth: 1280,
+      sourceHeight: 720,
+      durationMs: 10_000,
+      fps: 30,
+    });
+    const full = estimatedEnhancementSeconds({
+      profile: "ai",
+      benchmarkSecondsPerMegapixel: 1.19,
+      sourceWidth: 1280,
+      sourceHeight: 720,
+      durationMs: 10_000,
+      fps: 30,
+    });
+
+    if (fast === null || full === null) throw new Error("expected measured estimates");
+    expect(fast).toBeLessThan(full);
+  });
+
   it("returns no AI estimate without a measurement", () => {
     expect(
       estimatedEnhancementSeconds({

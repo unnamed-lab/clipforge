@@ -215,6 +215,7 @@ original source, and it runs locally.
 | --- | --- |
 | Standard | Lanczos resizing only. The default. |
 | Clean | Conservative `hqdn3d` denoise, then lanczos resizing. No AI. |
+| AI Enhance Fast | ESPCN 2×, no denoise or blend, native-size intermediate and a faster encode. May let composition lanczos the result up to the target. |
 | AI Enhance | ESPCN/Real-ESRGAN super-resolution at a conservative blend, then resize. |
 | AI Enhance+ | Full model strength, static-frame stabilisation, and a warning about altered texture. |
 

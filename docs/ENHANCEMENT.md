@@ -134,6 +134,12 @@ composed into portrait can still need more than 2×; the auto model selector
 chooses ESPCN 4× in that case. If the cap is reached, the remaining resize is
 conventional and the report still says so.
 
+**Fast AI is the deliberate exception.** It always selects ESPCN 2× and writes
+the model's native output size. For a 720p source composed into 1080×1920, the
+intermediate is 2560×1440 and composition scales it up 1.33× with lanczos. That
+extra conventional scale is the speed/disk trade-off; the UI warns about it and
+the gate still reports that AI ran and the source scale.
+
 ---
 
 ## 3. Models and licences
@@ -170,9 +176,15 @@ pipeline pass; Real-ESRGAN’s from the install benchmark (a 480×270 warm pass)
 
 | Model | Input throughput | 720p frame (0.92 MP) | Result |
 | --- | --- | --- | --- |
-| ESPCN x2 | 0.48 MP/s (measured full pass) | ≈ 1.4–1.9 s | Usable for short clips on CPU |
-| ESPCN x4 | similar compute, larger output | ≈ 1.5–2.1 s | Used for >2.25× composition |
+| ESPCN x2, full AI Enhance | 0.48 MP/s (measured full pass) | ≈ 1.4–1.9 s | Usable for short clips on CPU |
+| ESPCN x2, AI Enhance Fast | 0.62–0.74 MP/s (6 threads, no denoise/blend, native intermediate) | ≈ 1.2–1.5 s | About 20–30% faster than full AI |
+| ESPCN x4 | similar compute, larger output | ≈ 1.5–2.1+ s | Used for >2.25× composition |
 | Real-ESRGAN x2 | 0.0061 MP/s (162.6 s/MP measured at install) | ≈ 150 s | Not a usable CPU default; optional for short clips/GPU |
+
+At 30 fps, AI Enhance Fast is roughly **55–66 minutes for an 88 s 1080×1920
+clip** on the reference machine, depending on load. A 60 s clip is roughly
+37–44 minutes. Setting the export to 24 fps reduces both by 20% (an 88 s clip
+lands around 44–53 minutes).
 
 These numbers are why AI Enhance defaults to ESPCN, not Real-ESRGAN. The user can
 still select Real-ESRGAN after installing it; the UI then shows a measured
@@ -186,6 +198,7 @@ estimate rather than pretending it is fast.
 | --- | --- | --- | --- |
 | Standard | FFmpeg lanczos resize | No | Default. No denoise, no model. |
 | Clean | `hqdn3d` (default 30) + lanczos | No | Conservative denoise; preserves natural texture. |
+| AI Enhance Fast | ESPCN 2×, no denoise/blend, CRF 16 ultrafast intermediate at native model size | Yes | Speed path. If the target is larger than the model output, composition upscales the model result with lanczos, so it can look softer than AI Enhance. |
 | AI Enhance | ESPCN/Real-ESRGAN, default blend 0.90, optional denoise 15 | Yes | Reconstructs plausible pixels; does not restore native detail. |
 | AI Enhance+ | Model, blend 1.00, denoise 30, static-frame stabilisation | Yes | Stronger, slower; warns that faces/texture can change. Requires a comparison before export in the UI. |
 
@@ -344,6 +357,10 @@ The decision was made on paired visual inspection at 1:1.
   visible and speed matters.
 - **AI Enhance (ESPCN x2, blend 0.90, denoise 15)** for text/HUD-heavy gameplay
   or screen recordings where edge clarity is the main complaint.
+- **AI Enhance Fast** when a 1080p AI export has a time budget: it skips
+  denoise/blend and uses a native-size ultrafast intermediate. Prefer it for
+  dark gameplay where the final lanczos scale is not visible; use full AI when
+  fine text is the priority.
 - **AI Enhance+** only for short clips and after comparing a frame; it is the
   most likely to alter faces and fine texture.
 - **Real-ESRGAN** only after installing it and measuring a short clip; on CPU it
@@ -357,10 +374,11 @@ The decision was made on paired visual inspection at 1:1.
 
 Automated:
 
-- `apps/worker/tests/test_enhancement.py` — profile defaults, target geometry,
-  aspect validation, intermediate sizing, cache identity, fallback, refusal,
-  cancellation, preview/export chain parity, and **real rendered frames** for
-  landscape, portrait, AI and cache reuse. Two tests decode actual pixels: the
+- `apps/worker/tests/test_enhancement.py` — profile defaults (including Fast AI
+  and its native intermediate), target geometry, aspect validation, intermediate
+  sizing, cache identity, fallback, refusal, cancellation, preview/export chain
+  parity, and **real rendered frames** for landscape, portrait, AI and cache
+  reuse. Two tests decode actual pixels: the
   AI output is compared against a conventional resize of the same source, and
   a preview still is compared against the exported frame at the same timestamp.
 - `apps/worker/tests/test_enhancement_api.py` — upload → AI render → completed

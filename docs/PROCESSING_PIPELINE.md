@@ -213,6 +213,10 @@ retained source -> probe -> optional hqdn3d -> AI super-resolution (per frame)
 - **AI Enhance / AI Enhance+** build one cached intermediate per selected
   segment. Composition, captions and face-cam rectangles stay in normalised
   source coordinates, so they remain valid.
+- **AI Enhance Fast** uses ESPCN 2×, no denoise/blend, and the model's native
+  intermediate size with a CRF 16 ultrafast encode. When the target is larger
+  than the model output, composition applies one final lanczos scale; that is
+  the explicit speed/quality trade-off.
 - The pass samples at the final output frame rate. A 60 fps source rendered at
   30 fps is decoded and enhanced 30 times per second, not 60; the alternative
   doubled CPU time and intermediate size for frames the final `fps` filter

@@ -63,7 +63,7 @@ No licence file is present in the repository yet. Treat the source as all rights
 
 ## Video enhancement
 
-- **AI is slow on CPU.** The bundled ESPCN model takes roughly 35–85 seconds per second of 720p footage on the four-core reference laptop. Real-ESRGAN is roughly 100 seconds per frame, so it is optional and warned about. The UI reports a measured estimate, not a promise.
+- **AI is slow on CPU.** The bundled ESPCN model takes roughly 35–85 seconds per second of 720p footage on the four-core reference laptop. AI Enhance Fast removes denoise/blend and uses a native-size ultrafast intermediate to cut that, at the cost of a final lanczos scale when the target is larger than the model output. Real-ESRGAN is roughly 150 seconds per frame on CPU, so it is optional and warned about. The UI reports a measured estimate, not a promise.
 - **No GPU inference by default.** ESPCN uses OpenCV's CPU DNN. Real-ESRGAN can use CUDA or DirectML only if the installed ONNX Runtime provides that provider; no CUDA runtime ships with Clipforge.
 - **Upscaling is reconstruction, not recovery.** AI can invent texture and alter fine detail. A 1080p export from a 720p source is not native 1080p. The gate marks every AI render as a warning and names the model.
 - **No face restoration model.** GFPGAN/CodeFormer are not integrated because they can change identity-relevant details. Faces are handled by the general model at a conservative blend, and Clean is often the more natural choice.

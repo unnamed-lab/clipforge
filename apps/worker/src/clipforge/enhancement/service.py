@@ -54,7 +54,9 @@ logger = logging.getLogger(__name__)
 
 INTERMEDIATE_CRF = 12
 INTERMEDIATE_PRESET = "veryfast"
-ENCODER_VERSION = f"x264-crf{INTERMEDIATE_CRF}-{INTERMEDIATE_PRESET}-v1"
+FAST_INTERMEDIATE_CRF = 16
+FAST_INTERMEDIATE_PRESET = "ultrafast"
+ENCODER_VERSION = "x264-intermediate-v2"
 CACHE_LIMIT_BYTES = 2 * 1024 ** 3
 CACHE_DIR_NAME = "enhancement"
 MIN_CACHE_BYTES = 4096
@@ -74,6 +76,8 @@ class EnhancementPlan:
     restoration: float
     temporal: bool
     engine_label: str
+    intermediate_crf: int = INTERMEDIATE_CRF
+    intermediate_preset: str = INTERMEDIATE_PRESET
     warnings: list[str] = field(default_factory=list)
     fallback_reason: str | None = None
 
@@ -103,6 +107,8 @@ class EnhancementPlan:
             "denoise": self.denoise,
             "restoration": self.restoration,
             "temporal": self.temporal,
+            "intermediate_crf": self.intermediate_crf,
+            "intermediate_preset": self.intermediate_preset,
             "warnings": list(self.warnings),
             "fallback_reason": self.fallback_reason,
         }
@@ -139,6 +145,8 @@ def resolve_plan(
     model: ModelSpec | None = None
     intermediate: tuple[int, int] | None = None
     engine_label = "FFmpeg lanczos"
+    intermediate_crf = INTERMEDIATE_CRF
+    intermediate_preset = INTERMEDIATE_PRESET
     if settings.uses_ai:
         model = resolve_model(
             settings,
@@ -147,14 +155,29 @@ def resolve_plan(
             target_width=target[0],
             target_height=target[1],
         )
+        fast = settings.profile == "ai_fast"
         intermediate = intermediate_dimensions(
             source_width=source_width,
             source_height=source_height,
             target_width=target[0],
             target_height=target[1],
             model=model,
+            native=fast,
         )
-        engine_label = f"{model.label} + lanczos"
+        if fast:
+            intermediate_crf = FAST_INTERMEDIATE_CRF
+            intermediate_preset = FAST_INTERMEDIATE_PRESET
+            if intermediate[0] < target[0] or intermediate[1] < target[1]:
+                warnings.append(
+                    f"Fast AI writes a {intermediate[0]}×{intermediate[1]} intermediate. "
+                    f"Composition scales it to {target[0]}×{target[1]}, so fine detail may look "
+                    "softer than AI Enhance. This is the time-saving trade-off."
+                )
+        engine_label = (
+            f"{model.label} + fast lanczos"
+            if fast
+            else f"{model.label} + lanczos"
+        )
         effective = max(
             intermediate[0] / max(1, source_width),
             intermediate[1] / max(1, source_height),
@@ -175,6 +198,8 @@ def resolve_plan(
         restoration=float(settings.restoration),
         temporal=bool(settings.temporal_stabilize),
         engine_label=engine_label,
+        intermediate_crf=intermediate_crf,
+        intermediate_preset=intermediate_preset,
         warnings=warnings,
     )
 
@@ -267,7 +292,9 @@ def prepare_enhancement(
             model=plan.model,
             intermediate=plan.intermediate or (source_width, source_height),
             fps=fps,
-            encoder_version=ENCODER_VERSION,
+            encoder_version=(
+                f"{ENCODER_VERSION}-crf{plan.intermediate_crf}-{plan.intermediate_preset}"
+            ),
         )
         final = cache_dir / f"{key}.mp4"
         cached = _cached_segment(final, plan, segment, fps)
@@ -440,8 +467,8 @@ def _enhance_segment(
                 width=width,
                 height=height,
                 fps=fps,
-                crf=INTERMEDIATE_CRF,
-                preset=INTERMEDIATE_PRESET,
+                crf=plan.intermediate_crf,
+                preset=plan.intermediate_preset,
             )
             previous_small: np.ndarray | None = None
             previous_ai: np.ndarray | None = None
@@ -542,6 +569,7 @@ def _cached_segment(
         "height": plan.intermediate[1] if plan.intermediate else None,
         "restoration": round(plan.restoration, 4),
         "denoise": plan.denoise,
+        "encoder": f"{ENCODER_VERSION}-crf{plan.intermediate_crf}-{plan.intermediate_preset}",
     }
     for key, value in expected.items():
         if manifest.get(key) != value:
@@ -592,7 +620,7 @@ def _write_manifest(
         "restoration": round(plan.restoration, 4),
         "denoise": plan.denoise,
         "temporal": plan.temporal,
-        "encoder": ENCODER_VERSION,
+        "encoder": f"{ENCODER_VERSION}-crf{plan.intermediate_crf}-{plan.intermediate_preset}",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     manifest = path.with_suffix(".json")
