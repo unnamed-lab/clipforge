@@ -68,6 +68,7 @@ function severityTone(severity: string): "bad" | "warn" | "neutral" {
 }
 
 function FindingRow({ finding }: { finding: ProductionFinding }) {
+  const evidence = finding.evidence ?? [];
   return (
     <li className="space-y-1 border-t border-white/5 py-2 first:border-t-0">
       <div className="flex flex-wrap items-center gap-1.5">
@@ -83,8 +84,8 @@ function FindingRow({ finding }: { finding: ProductionFinding }) {
           output {finding.output_range.start_ms}–{finding.output_range.end_ms} ms
         </p>
       ) : null}
-      {finding.evidence.length > 0 ? (
-        <p className="text-[10.5px] text-mist-600">{finding.evidence.join(" · ")}</p>
+      {evidence.length > 0 ? (
+        <p className="text-[10.5px] text-mist-600">{evidence.join(" · ")}</p>
       ) : null}
     </li>
   );
@@ -103,9 +104,15 @@ function ClipCard({
   onApprove: (clipId: string, approved: boolean) => void;
   onRemove: (clip: ProductionClip) => void;
 }) {
-  const review = clip.review;
-  const findings = clip.findings.length > 0 ? clip.findings : review.findings;
-  const modelReview = review.model_review as Record<string, unknown>;
+  const review = clip.review ?? {
+    summary: "",
+    findings: [],
+    checks: [],
+    model_review: {},
+    remaining_warnings: [],
+  };
+  const findings = clip.findings?.length ? clip.findings : review.findings ?? [];
+  const modelReview = (review.model_review ?? {}) as Record<string, unknown>;
   return (
     <article className="rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -175,7 +182,7 @@ function ClipCard({
       <p className="mt-1.5 text-[11px] leading-relaxed text-mist-500">
         {review.summary || "The rendered file has not been reviewed yet."}
       </p>
-      {modelReview.status ? (
+      {modelReview?.status ? (
         <p className="mt-1 text-[10.5px] text-mist-600">
           Model review: {String(modelReview.status)}
           {modelReview.basis ? ` · ${String(modelReview.basis)}` : ""}
