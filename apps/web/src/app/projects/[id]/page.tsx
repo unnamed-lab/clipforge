@@ -1,5 +1,11 @@
 import { notFound } from "next/navigation";
-import type { Capabilities, ProjectDetail, Transcript } from "@clipforge/shared";
+import type {
+  Capabilities,
+  ExportList,
+  PipelineState,
+  ProjectDetail,
+  Transcript,
+} from "@clipforge/shared";
 import { ProjectWorkspace } from "./project-workspace";
 import { errorMessage, WorkerError, workerJson } from "@/lib/worker";
 
@@ -24,14 +30,24 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
     );
   }
 
-  const [capabilities, transcript] = await Promise.all([
+  const [capabilities, transcript, pipeline, exports] = await Promise.all([
     workerJson<Capabilities>("/api/capabilities").catch(() => null),
     detail.source
       ? workerJson<{ transcript: Transcript }>(`/api/projects/${id}/transcript`)
           .then((response) => response.transcript)
           .catch(() => null)
       : Promise.resolve(null),
+    workerJson<PipelineState>(`/api/projects/${id}/pipeline`).catch(() => null),
+    workerJson<ExportList>(`/api/projects/${id}/exports`).catch(() => null),
   ]);
 
-  return <ProjectWorkspace detail={detail} capabilities={capabilities} transcript={transcript} />;
+  return (
+    <ProjectWorkspace
+      detail={detail}
+      capabilities={capabilities}
+      transcript={transcript}
+      pipeline={pipeline}
+      exports={exports}
+    />
+  );
 }

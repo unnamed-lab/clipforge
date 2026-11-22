@@ -24,6 +24,7 @@ from clipforge.errors import Conflict, NotFound, ValidationFailed
 from clipforge.media.assets import visual_input
 from clipforge.media.process import require
 from clipforge.profiles.spec import profile_snapshot, resolve_settings
+from clipforge.rendering import intake
 from clipforge.rendering.composition import expand_composition
 from clipforge.rendering.encode import EncodeSettings, resolve_encode
 from clipforge.rendering.ffmpeg import (
@@ -50,70 +51,24 @@ MAX_RENDER_MS = 15 * 60 * 1000
 
 
 def _profile_document(settings: dict) -> dict:
-    return {
-        "branding": settings.get("branding") or {},
-        "captions": settings.get("captions") or {},
-        "audio": settings.get("audio") or {},
-        "export": settings.get("export") or {},
-        "brief": settings.get("brief") or {},
-        "rules": settings.get("rules") or {},
-    }
+    return intake.profile_document(settings)
 
 
 def _caption_overrides(settings: dict, payload: RenderRequest) -> dict:
-    captions = settings["captions"]
-    overrides = {
-        "max_chars_per_line": captions.get("max_chars_per_line", 0),
-        "shadow": captions.get("shadow", 0.0),
-        "background_opacity": captions.get("background_opacity", 65),
-        "highlight": "word" if captions.get("highlight_words", True) else "none",
-    }
-    for key in ("position", "position_pct", "alignment", "margin_v"):
-        if key in captions:
-            overrides[key] = captions[key]
-    if payload.captions is not None:
-        # Only fields the client actually sent may override the profile/preset.
-        # Dumping defaults here would silently reset geometry the UI never touched.
-        overrides.update(payload.captions.model_dump(exclude_unset=True))
-    return overrides
+    sent = payload.captions.model_dump(exclude_unset=True) if payload.captions is not None else None
+    return intake.caption_overrides(
+        settings, captions=sent, captions_explicit=payload.captions is not None
+    )
 
 
 def _audio_payload(settings: dict, payload: RenderRequest) -> dict:
-    audio = settings["audio"]
-    values = {
-        "mode": audio.get("mode", "original"),
-        "music_asset_id": audio.get("music_asset_id"),
-        "music_gain_db": audio.get("music_gain_db", -18.0),
-        "duck_music": audio.get("duck_music", True),
-        "normalize": bool(audio.get("normalize", False) or payload.normalize_audio),
-        "denoise": bool(audio.get("denoise", False)),
-        "dialogue_enhance": bool(audio.get("dialogue_enhance", False)),
-        "fade_in_ms": int(audio.get("fade_in_ms", 0)),
-        "fade_out_ms": int(audio.get("fade_out_ms", 0)),
-    }
-    values.update(payload.audio or {})
-    return values
+    return intake.audio_payload(
+        settings, audio=payload.audio, normalize_audio=payload.normalize_audio
+    )
 
 
 def _logo_payload(settings: dict, payload: RenderRequest) -> tuple[dict, bool]:
-    branding = settings["branding"]
-    asset_id = branding.get("logo_asset_id")
-    values = {
-        "enabled": bool(asset_id),
-        "required": bool(branding.get("logo_required", False)),
-        "asset_id": asset_id,
-        "position": branding.get("logo_position", "top-right"),
-        "width_pct": branding.get("logo_width_pct", 18.0),
-        "opacity": branding.get("logo_opacity", 1.0),
-        "margin_px": branding.get("logo_margin_px", 48),
-        "custom_x_pct": branding.get("logo_custom_x_pct", 82.0),
-        "custom_y_pct": branding.get("logo_custom_y_pct", 8.0),
-        "from_ms": branding.get("logo_from_ms"),
-        "to_ms": branding.get("logo_to_ms"),
-    }
-    values.update(payload.logo or {})
-    override = bool(values.pop("override_required", False))
-    return values, override
+    return intake.logo_payload(settings, logo=payload.logo)
 
 
 def _editorial_summary(plan: dict, *, applied: bool, fallback: str = "") -> dict:
@@ -245,30 +200,13 @@ def _checks(settings: dict, captions_enabled: bool, logo: dict, audio: dict, ove
 
 
 def _resolve_compression(raw: object) -> EncodeSettings:
-    if raw is None:
-        return resolve_encode(None)
-    if isinstance(raw, str):
-        try:
-            return resolve_encode(raw)
-        except ValueError as exc:
-            raise ValidationFailed(str(exc), code="invalid_compression") from exc
-    if not isinstance(raw, dict):
-        raise ValidationFailed("Compression settings must be an object", code="invalid_compression")
-    custom = {key: value for key, value in raw.items() if key != "preset"}
-    try:
-        return resolve_encode(raw.get("preset"), custom or None)
-    except ValueError as exc:
-        raise ValidationFailed(str(exc), code="invalid_compression") from exc
+    return intake.resolve_compression(raw)
 
 
 def _compression_payload(settings: dict, payload: RenderRequest, explicit: set[str]) -> EncodeSettings:
-    """Resolve the compression choice, honouring a project-level default.
-
-    An explicit request always wins; otherwise the profile's saved export
-    preferences are used, and only then the balanced preset.
-    """
-    raw = payload.compression if "compression" in explicit else (settings.get("export") or {}).get("compression")
-    return _resolve_compression(raw)
+    return intake.compression_payload(
+        settings, compression=payload.compression, explicit="compression" in explicit
+    )
 
 
 def _layout_payload(settings: dict, payload: RenderRequest) -> dict:
@@ -278,66 +216,7 @@ def _layout_payload(settings: dict, payload: RenderRequest) -> dict:
     preset saved on the project cannot mean one thing in the UI and another in
     the encoder.
     """
-    export = settings["export"]
-    explicit = payload.model_fields_set
-    face_cam_rect = (
-        payload.face_cam_rect if "face_cam_rect" in explicit else export.get("face_cam_rect")
-    )
-    if hasattr(face_cam_rect, "model_dump"):
-        face_cam_rect = face_cam_rect.model_dump()
-    return {
-        "aspect": payload.aspect if "aspect" in explicit else export.get("aspect", payload.aspect),
-        "resolution": (
-            payload.resolution if "resolution" in explicit
-            else int(export.get("resolution", payload.resolution))
-        ),
-        "resolution_mode": (
-            payload.resolution_mode if "resolution_mode" in explicit
-            else export.get("resolution_mode", "class")
-        ),
-        "custom_width": (
-            payload.custom_width if "custom_width" in explicit
-            else export.get("custom_width")
-        ),
-        "custom_height": (
-            payload.custom_height if "custom_height" in explicit
-            else export.get("custom_height")
-        ),
-        "enhancement": (
-            payload.enhancement.model_dump()
-            if payload.enhancement is not None
-            else export.get("enhancement")
-        ),
-        "framing": (
-            payload.framing if "framing" in explicit
-            else settings["branding"].get("framing", payload.framing)
-        ),
-        "fps": payload.fps if "fps" in explicit else export.get("fps"),
-        "composition": (
-            payload.composition if "composition" in explicit
-            else export.get("composition", "auto")
-        ),
-        "face_cam_position": (
-            payload.face_cam_position if "face_cam_position" in explicit
-            else export.get("face_cam_position", "bottom")
-        ),
-        "face_cam_rect": face_cam_rect,
-        "face_cam_overrides": (
-            [item.model_dump() for item in payload.face_cam_overrides]
-            if "face_cam_overrides" in explicit
-            else list(export.get("face_cam_overrides") or [])
-        ),
-        "stack_split_pct": (
-            payload.stack_split_pct if "stack_split_pct" in explicit
-            else float(export.get("stack_split_pct", 60.0))
-        ),
-        "adaptive_stack": (
-            payload.adaptive_stack if "adaptive_stack" in explicit
-            else bool(export.get("adaptive_stack", False))
-        ),
-        "crop_x_pct": payload.crop_x_pct if "crop_x_pct" in explicit else export.get("crop_x_pct"),
-        "crop_y_pct": payload.crop_y_pct if "crop_y_pct" in explicit else export.get("crop_y_pct"),
-    }
+    return intake.layout_payload(settings, payload.model_dump(), set(payload.model_fields_set))
 
 
 @router.post("/projects/{project_id}/renders/estimate")
@@ -1178,7 +1057,8 @@ def download_render(render_id: str, request: Request):
     project = state.repos.projects.get(raw["project_id"])
     spec = RenderSpec.model_validate(json.loads(raw["spec_json"] or "{}"))
     label = spec.title or "clip"
-    filename = display_name(f"{project['name']} - {label}", fallback="clip")
+    filename = raw.get("display_name") or display_name(f"{project['name']} - {label}", fallback="clip")
+    filename = display_name(filename, fallback="clip")
     if not filename.lower().endswith(".mp4"):
         filename += ".mp4"
     return FileResponse(path, media_type="video/mp4", filename=filename, headers={"Cache-Control": "no-store"})

@@ -41,6 +41,19 @@ directory, FFmpeg, Python, or the token file when `CLIPFORGE_WORKER_TOKEN` is se
 | `CLIPFORGE_LLM_MODEL` | empty | if LLM enabled | Model name at that endpoint. |
 | `CLIPFORGE_LLM_API_KEY` | empty | if LLM enabled | Bearer token. Secret. |
 | `CLIPFORGE_LLM_TIMEOUT_SECONDS` | `60` | no | Adapter timeout. |
+| `CLIPFORGE_LLM_PROVIDER` | empty | no | `none`, `ollama` or `openai_compatible`. Empty derives from the legacy LLM settings. |
+| `CLIPFORGE_LLM_ALLOW_REMOTE` | `false` | no | Remote endpoints are refused unless this is explicitly enabled. Local loopback endpoints are unaffected. |
+| `CLIPFORGE_LLM_EDITORIAL_ENABLED` | `false` | no | Enables the model editorial director. Without it the deterministic planner is used. |
+| `CLIPFORGE_LLM_EDITORIAL_MODEL` | empty | no | Model used for direction; falls back to `CLIPFORGE_LLM_MODEL`. |
+| `CLIPFORGE_AUTOPRODUCE_ENABLED` | `true` | no | Enables `POST /api/projects/{id}/autoproduce`. |
+| `CLIPFORGE_AUTOPRODUCE_CLIP_LIMIT` | `8` | no | Maximum clips requested from one automatic run. |
+| `CLIPFORGE_AUTOPRODUCE_REPAIR_LIMIT` | `2` | no | Editorial repair renders per clip. Technical retries are counted separately. |
+| `CLIPFORGE_AUTOPRODUCE_TECHNICAL_RETRIES` | `1` | no | Automatic retry of a failed render without consuming an editorial repair. |
+| `CLIPFORGE_PIPELINE_STAGE_TIMEOUT_SECONDS` | `1800` | no | Per-stage limit; long stages abort with `stage_timeout`. |
+| `CLIPFORGE_PIPELINE_DEADLINE_SECONDS` | `14400` | no | Hard run deadline persisted on the run and job. |
+| `CLIPFORGE_PIPELINE_STALL_SECONDS` | `300` | no | No-heartbeat interval before a pipeline job is treated as stalled. Slow active work keeps a heartbeat. |
+| `CLIPFORGE_RENDER_TIMEOUT_SECONDS` | `2400` | no | FFmpeg execution timeout passed by the pipeline. |
+| `CLIPFORGE_EXPORT_DIR` | `~/Documents/Clipforge` | no | Default root for delivered clips. Each project gets its own subfolder; a project can override it. |
 | `CLIPFORGE_YOUTUBE_API_KEY` | empty | no | Official YouTube Data API discovery. Without it the connector reports unavailable. |
 | `CLIPFORGE_TWITCH_CLIENT_ID` | empty | no | Twitch Helix connector. |
 | `CLIPFORGE_TWITCH_CLIENT_SECRET` | empty | no | Twitch Helix connector. Secret. |

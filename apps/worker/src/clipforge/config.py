@@ -79,7 +79,44 @@ class Settings:
     supabase_bucket: str = "clipforge"
     supabase_storage_prefix: str = "/storage/v1"
     supabase_timeout_seconds: int = 60
+    # -- autonomous production -------------------------------------------------
+    # Every limit is configurable. The defaults are conservative safety
+    # boundaries, not predictions: a stage timeout stops a dead process, a
+    # stall is evidence of no heartbeat, and the deadline is the last resort.
+    autoproduce_enabled: bool = True
+    autoproduce_clip_limit: int = 8
+    autoproduce_repair_limit: int = 2
+    autoproduce_technical_retries: int = 1
+    pipeline_stage_timeout_seconds: int = 1_800
+    pipeline_deadline_seconds: int = 4 * 60 * 60
+    pipeline_stall_seconds: int = 300
+    pipeline_heartbeat_seconds: float = 10.0
+    render_timeout_seconds: int = 2_400
+    # Which provider the registry may use. Empty means "derive from the legacy
+    # base URL": a configured endpoint is openai_compatible, otherwise none.
+    llm_provider: str = ""
+    llm_execution: str = "local"
+    # Remote providers are opt-in. A loopback endpoint is local by definition.
+    llm_allow_remote: bool = False
+    llm_editorial_enabled: bool = False
+    llm_editorial_model: str = ""
+    # Where approved deliverables are copied. None means Documents/Clipforge.
+    export_dir: Path | None = None
     extra: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def effective_export_dir(self) -> Path:
+        root = self.export_dir or (Path.home() / "Documents" / "Clipforge")
+        return root.expanduser()
+
+    @property
+    def resolved_llm_provider(self) -> str:
+        explicit = self.llm_provider.strip().lower()
+        if explicit:
+            return explicit
+        if self.llm_enabled and self.llm_base_url:
+            return "openai_compatible"
+        return "none"
 
     @property
     def db_path(self) -> Path:
@@ -169,5 +206,24 @@ def load_settings() -> Settings:
         supabase_bucket=os.environ.get("CLIPFORGE_SUPABASE_BUCKET", "clipforge").strip() or "clipforge",
         supabase_storage_prefix=os.environ.get("CLIPFORGE_SUPABASE_STORAGE_PREFIX", "/storage/v1"),
         supabase_timeout_seconds=_env_int("CLIPFORGE_SUPABASE_TIMEOUT_SECONDS", 60),
+        autoproduce_enabled=_env_bool("CLIPFORGE_AUTOPRODUCE_ENABLED", True),
+        autoproduce_clip_limit=max(1, _env_int("CLIPFORGE_AUTOPRODUCE_CLIP_LIMIT", 8)),
+        autoproduce_repair_limit=max(0, _env_int("CLIPFORGE_AUTOPRODUCE_REPAIR_LIMIT", 2)),
+        autoproduce_technical_retries=max(0, _env_int("CLIPFORGE_AUTOPRODUCE_TECHNICAL_RETRIES", 1)),
+        pipeline_stage_timeout_seconds=max(60, _env_int("CLIPFORGE_PIPELINE_STAGE_TIMEOUT_SECONDS", 1_800)),
+        pipeline_deadline_seconds=max(600, _env_int("CLIPFORGE_PIPELINE_DEADLINE_SECONDS", 4 * 60 * 60)),
+        pipeline_stall_seconds=max(0, _env_int("CLIPFORGE_PIPELINE_STALL_SECONDS", 300)),
+        pipeline_heartbeat_seconds=max(1.0, _env_int("CLIPFORGE_PIPELINE_HEARTBEAT_SECONDS", 10)),
+        render_timeout_seconds=max(60, _env_int("CLIPFORGE_RENDER_TIMEOUT_SECONDS", 2_400)),
+        llm_provider=os.environ.get("CLIPFORGE_LLM_PROVIDER", "").strip().lower(),
+        llm_execution=os.environ.get("CLIPFORGE_LLM_EXECUTION", "local").strip().lower() or "local",
+        llm_allow_remote=_env_bool("CLIPFORGE_LLM_ALLOW_REMOTE", False),
+        llm_editorial_enabled=_env_bool("CLIPFORGE_LLM_EDITORIAL_ENABLED", False),
+        llm_editorial_model=os.environ.get("CLIPFORGE_LLM_EDITORIAL_MODEL", "").strip(),
+        export_dir=(
+            _env_path("CLIPFORGE_EXPORT_DIR", Path.home() / "Documents" / "Clipforge")
+            if os.environ.get("CLIPFORGE_EXPORT_DIR", "").strip()
+            else None
+        ),
     )
     return settings

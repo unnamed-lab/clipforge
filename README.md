@@ -19,8 +19,9 @@ Clipforge runs as two local processes: a Next.js web app and a Python worker tha
 3. **Find moments** with boundary-aware candidate generation, deterministic explainable scoring and near-duplicate removal. Optional LLM rescoring is off by default and requires explicit consent.
 4. **Plan the edit** with a duration target, hook, narrative strategy, pacing profile and a source-to-timeline map. Reordered plans are not applied silently.
 5. **Review and trim** against transcript snap points, check a proposed ending, keep or reject candidates, and see exactly why each score was given.
-6. **Package** the clip with grounded titles, descriptions, hashtags and keywords, per-field regeneration, a title rubric and an optional trend check.
-7. **Export** 9:16, 16:9 or 1:1 video at 720p–4K with scene-aware composition, burned-in or sidecar captions, compression presets, audio normalisation, optional local video enhancement (Standard/Clean/AI Enhance/AI Enhance+), before/after frame comparison and a measured export quality gate.
+6. **Produce automatically** with one project run: the editorial director selects moments and strategies, the renderer exports them, the output is reviewed, supported defects are repaired within a bounded loop, and every export is versioned with a review report.
+7. **Package** the clip with grounded titles, descriptions, hashtags and keywords, per-field regeneration, a title rubric and an optional trend check.
+8. **Export** 9:16, 16:9 or 1:1 video at 720p-4K with scene-aware composition, burned-in or sidecar captions, compression presets, audio normalisation, optional local video enhancement (Standard/Clean/AI Enhance/AI Enhance+), before/after frame comparison and a measured export quality gate.
 
 The score in the editor is an **editorial estimate from transcript features, not a prediction of reach or engagement**.
 
@@ -39,6 +40,7 @@ The score in the editor is an **editorial estimate from transcript features, not
 | Export | 9:16 / 16:9 / 1:1; preserve-source, 720p, 1080p, 1440p, 4K or custom even dimensions; Auto, Fill/crop, Contain, Picture-in-picture or Manual composition; per-scene composition decisions with reasons and warnings; hook and editorial application; Standard/Clean/AI Enhance/AI Enhance+ video quality profiles with a same-frame before/after comparison; compression presets or custom CRF/bitrate/width/fps; optional logo overlay; persistent render history. |
 | Packaging | Titles across eight angles; title rubric and rejection of unsupported claims; description, hashtags, keywords, thumbnail text; field-level regeneration that preserves approved fields; optional YouTube/Twitch/trend providers, all reported honestly when unavailable. |
 | Quality gate | FFprobe/FFmpeg evidence for streams, dimensions, source resolution, frame rate, duration and duration target, full decode, audio track, A/V sync, black frames, freezes, caption bounds, composition warnings, logo overlays and ending review. A blocking failure keeps the draft for inspection and does not publish it as a finished render. |
+| Automatic production | One project run analyses, selects moments, chooses per-clip strategies, configures the frame, renders, reviews the actual output, applies supported repairs and packages versioned exports. Durable stage checkpoints, cancellation, stall and deadline handling, provider-independent direction with a deterministic fallback, and a persisted review report per export. Approved clips are copied to a configurable project export folder (default `Documents/Clipforge/<project>`). |
 | Operations | Persistent SQLite job queue with stages, progress, cancellation, retry and dedupe; local or Supabase Storage; disk-space guards; health and capability reporting; Docker Compose and Render Blueprint. |
 
 Some capabilities exist only in the worker API, not the workspace UI: reusable brand/project profiles, uploaded logo and music assets, custom caption presets, content library and rights tracking, evaluation datasets, and explicit multi-segment render specs. The [user guide](docs/USER_GUIDE.md) marks the boundary.
@@ -295,6 +297,7 @@ data/                  Runtime data (git-ignored)
 | [Known limitations](docs/KNOWN_LIMITATIONS.md) | What is deliberately absent, and what "verified" means here. |
 | [Architecture](docs/ARCHITECTURE.md) | Service boundaries, data model, job model and security rules. |
 | [Processing pipeline](docs/PROCESSING_PIPELINE.md) | Import, probe, transcription, segmentation, ranking, rendering and cleanup. |
+| [Automatic production](docs/PROJECT_PIPELINE.md) | Project run stages, provider policy, review findings, bounded repairs, timeouts and versioned exports. |
 | [Local development](docs/deployment/LOCAL_DEVELOPMENT.md) | Prerequisites, install, run, checks and troubleshooting. |
 | [Docker](docs/deployment/DOCKER.md) | Compose topology and volume behaviour. |
 | [Render](docs/deployment/RENDER.md) | Blueprint deployment and its limits. |
@@ -309,9 +312,11 @@ data/                  Runtime data (git-ignored)
 - CPU-only transcription; a one-hour recording can take tens of minutes depending on model and hardware.
 - One worker process and one SQLite writer. No horizontal scaling.
 - No speaker diarisation, face tracking or speaker-aware reframing.
-- Jobs interrupted by a worker restart are marked failed; there is no automatic resume.
+- Automatic production resumes its own checkpoints after a restart. Standalone transcription/render jobs still restart from the beginning when retried.
 - The workspace edits one clip at a time. Multi-segment render specs are supported by the API, not authored in the UI.
 - `split` composition is not available for a single source and degrades to contain with a warning.
+- Automatic repairs cover caption geometry, sentence-boundary endings, duplicate segments and crop containment. Unreadable slides and uncertain webcam regions need a person.
+- The model editorial director is optional. It reads transcript evidence and measured composition metadata; it does not watch frames.
 - Packaging metadata is a draft for a human to publish; there is no publishing integration.
 - Browser automation is not part of the verification gate.
 

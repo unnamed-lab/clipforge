@@ -37,7 +37,7 @@ No licence file is present in the repository yet. Treat the source as all rights
 
 - **CPU-only speech recognition in practice.** `CLIPFORGE_WHISPER_DEVICE` accepts `cpu` or `cuda`, but only the CPU int8 path is supported and tested, and `/api/capabilities` reports GPU transcription as unavailable (`gpu_required: false`, `acceleration_for_transcription: false`). A `cuda` value requires a CUDA-capable CTranslate2 build this install does not provide. A one-hour recording on the reference four-core laptop takes tens of minutes with `small`.
 - **No speaker diarisation.** The diarisation provider is a stub that reports unavailable. Speaker labels, "who said what" filters and speaker-aware candidate selection are not implemented. `include_speakers` exists in the brief but cannot be grounded in speaker data.
-- **No face tracking, active-speaker detection or gaze-aware reframing.** Composition is scene-level: aspect, edges, text density and motion, not faces.
+- **Webcam tracking is not active-speaker detection or gaze-aware reframing.** A webcam panel can be detected, tracked and locked manually, but the face-cam clue is visual panel evidence. There is no identity verification, gaze tracking or automatic switch to an in-game face.
 - **Word timings are model output.** ASR errors propagate into captions and scoring. The worker stores corrections separately from the transcript, but the workspace has no correction editor. Corrections are API-only and do not re-rank existing candidates.
 - **Language coverage is whatever the configured faster-whisper model supports.** There is no per-language validation beyond a short hint and detected probability.
 - **The score is an editorial estimate.** It is a weighted average of transcript features. It is not a prediction of reach, watch time, revenue or platform distribution. No engagement data is used.
@@ -57,9 +57,18 @@ No licence file is present in the repository yet. Treat the source as all rights
 - **Picture-in-picture uses a blurred background.** The layout is not a designed split screen with independent foreground and background framing.
 - **Caption text is not editable in the workspace.** Word corrections exist through the API. Burned-in captions are generated from stored timings and the selected preset.
 - **Caption readability is measured geometrically.** The gate checks rendered bounds against the frame and safe area. It does not judge contrast against a moving background, reading speed or line-break quality.
-- **No automatic loudness standard compliance.** Normalisation applies FFmpeg loudness normalisation. The gate checks that audio exists and that A/V sync is plausible; it does not certify −14 LUFS or broadcast delivery.
+- **Audio checks are level checks, not loudness certification.** The review measures peak and mean volume with `volumedetect` and flags likely clipping or unexpected silence. It does not certify -14 LUFS or broadcast delivery, and it cannot tell whether speech was cut mid-word without transcript evidence.
 - **Logo and music are profile/API concepts.** The workspace export panel exposes composition, captions, normalisation and compression. Logo overlays, music beds, ducking and fades require the render API with an uploaded asset.
-- **Boundary review is a suggestion.** It detects trailing shots and proposes alternative out points. It can miss a bad ending or propose an unnecessary cut. Nothing is applied automatically.
+- **Boundary review is a suggestion in the manual editor.** It detects trailing shots and proposes alternative out points. The automatic pipeline may apply a sentence-boundary repair only when the ending evidence is suspicious and a spoken sentence alternative is confident. It can still miss a bad ending or propose an unnecessary cut.
+
+## Automatic production
+
+- **Automatic review is bounded, not omniscient.** It evaluates the encoded file with FFprobe/FFmpeg, the canonical EDL, transcript boundaries, measured audio levels and face-cam track evidence. It cannot hear the audio or watch motion, so "no blocking finding" is not proof of editorial quality.
+- **The model director is optional and evidence-limited.** It reads candidate excerpts, source timestamps and measured metadata. It does not watch frames. Its confidence is a self-report, not a measure of reach or audience response.
+- **Automatic repairs are narrow.** Caption geometry, confident sentence-boundary endings, exact duplicate spans and crop containment are supported. Unreadable slides, uncertain webcam states, measured audio clipping and narrative concerns are flagged for a person.
+- **A repair changes the EDL version.** The new render is a new export version; the previous valid file is retained and marked superseded. If no repair improves the measured report, the best valid version is kept and the clip is marked for review.
+- **The run is sequential.** One worker executes stages and clips in order. CPU/GPU/disk budgets are not shared across parallel renders because parallel rendering is not implemented.
+- **Stage timeout is enforced where the stage reports progress.** A long blocking call that reports nothing is caught by stall detection; a stage that never reports and never returns relies on the job watchdog and the process restart policy.
 
 ## Video enhancement
 
@@ -91,9 +100,9 @@ No licence file is present in the repository yet. Treat the source as all rights
 ## Operations and scale
 
 - **One worker process, one SQLite writer.** Do not run two workers against the same data directory. Do not mount the SQLite file on a network filesystem. The queue is a single-consumer FIFO, so one slow transcription delays every later job, including renders.
-- **Resume is download-only.** A URL import interrupted by an outage or a worker restart resumes from the bytes it already fetched. Transcription and rendering have no checkpoint: an interrupted job of those types is marked failed (`worker_restarted`) and starts over when retried. Partial renders are discarded.
+- **Resume is per workflow.** A URL import resumes from its own bytes. An automatic production run resumes from its last completed stage and reuses a valid transcript, candidate set, configuration and render. Standalone transcription and render jobs still have no internal checkpoint: an interrupted one of those types is marked failed (`worker_restarted`) and starts over when retried.
 - **Cancellation is cooperative.** FFmpeg/ffprobe subprocesses are terminated and handlers check between stages. A blocking library call may take time to notice.
-- **Retry usually runs the job again from the start.** The exception is a URL import, which resumes whatever it still has on disk. There is no checkpointing inside transcription or rendering.
+- **Retry depends on the job type.** An automatic production run resumes from its checkpoints. Every other job normally runs again from the start, except a URL import, which resumes whatever it still has on disk.
 - **Disk usage is real.** Sources are retained for renders. Proxies, audio, waveform images, model caches, scene thumbnails, drafts and finished renders accumulate under `data/` or the Compose volume. The reserve floor prevents the disk from reaching zero; it does not clean up for you.
 - **Upload is a single multipart request.** There is no direct browser-to-storage upload and no resumable upload. Large files consume worker memory and request time, and are limited by `CLIPFORGE_MAX_UPLOAD_MB`.
 - **URL import depends on `yt-dlp` and the source site.** It can break when a site changes, when a video is region-locked, or when a rendition is unavailable. Inspection is metadata-only and its size is approximate. A download keeps a sidecar resume manifest next to its fragments; fragments without a matching manifest are discarded rather than appended to.

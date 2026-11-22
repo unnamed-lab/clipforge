@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -51,11 +52,24 @@ class OpenAiCompatibleScorer:
     api_key: str
     timeout_seconds: int = 60
     name: str = "openai-compatible"
+    provider_id: str = "openai_compatible"
+    privacy: str = "remote"
 
     def available(self) -> tuple[bool, str | None]:
         if not self.base_url or not self.model:
             return False, "No LLM endpoint configured"
         return True, None
+
+    def info(self) -> dict:
+        return {
+            "id": self.provider_id,
+            "label": "OpenAI-compatible endpoint",
+            "base_url": self._endpoint(),
+            "model": self.model,
+            "privacy": self.privacy,
+            "structured_output": True,
+            "context_limit": None,
+        }
 
     def _endpoint(self) -> str:
         base = self.base_url.rstrip("/")
@@ -83,18 +97,36 @@ class OpenAiCompatibleScorer:
         parsed = self.complete_json(SYSTEM_PROMPT, user_prompt)
         return self._validate(parsed, clips)
 
-    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+    def complete_json(self, system_prompt: str, user_prompt: str,
+                      *, max_tokens: int | None = None) -> dict:
         """Return one parsed JSON object from an OpenAI-compatible endpoint.
 
         Kept separate from scoring so packaging can reuse the transport without
         changing the scoring protocol. Callers must validate the content; this
         method only guarantees the response parsed as a JSON object.
         """
+        parsed, _ = self.complete_json_meta(system_prompt, user_prompt, max_tokens=max_tokens)
+        return parsed
+
+    def complete_json_meta(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int | None = None,
+        max_attempts: int = 2,
+    ) -> tuple[dict, dict]:
+        """One JSON object plus measured transport metadata.
+
+        A transient connection error or 5xx is retried once. A 4xx, a malformed
+        body or unparseable content is not retried here; the caller decides
+        whether a corrected prompt is worth a second attempt.
+        """
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        body = {
+        body: dict = {
             "model": self.model,
             "temperature": 0,
             "messages": [
@@ -103,27 +135,100 @@ class OpenAiCompatibleScorer:
             ],
             "response_format": {"type": "json_object"},
         }
+        if max_tokens:
+            body["max_tokens"] = int(max_tokens)
 
-        attempt_body = body
+        started = time.monotonic()
+        attempt = 0
+        response = None
+        drop_response_format = False
+        while attempt < max(1, max_attempts):
+            attempt += 1
+            attempt_body = dict(body)
+            if drop_response_format:
+                attempt_body.pop("response_format", None)
+            try:
+                with httpx.Client(timeout=self.timeout_seconds) as client:
+                    response = client.post(self._endpoint(), headers=headers, json=attempt_body)
+                    if response.status_code >= 400 and "response_format" in attempt_body:
+                        # Some local servers reject response_format; retry without it once.
+                        drop_response_format = True
+                        fallback = {k: v for k, v in attempt_body.items() if k != "response_format"}
+                        response = client.post(self._endpoint(), headers=headers, json=fallback)
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                if attempt < max_attempts:
+                    continue
+                raise ProviderUnavailable(
+                    "The LLM endpoint timed out or refused the connection",
+                    code="llm_unreachable",
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise ProviderUnavailable(
+                    "The LLM endpoint could not be reached", code="llm_unreachable"
+                ) from exc
+            if response.status_code >= 500 and attempt < max_attempts:
+                continue
+            break
+
+        assert response is not None
+        if response.status_code >= 500:
+            raise ProviderUnavailable(
+                "The LLM endpoint returned a server error", code="llm_server_error"
+            )
+        if response.status_code >= 400:
+            raise ProviderUnavailable(
+                f"The LLM endpoint rejected the request ({response.status_code})",
+                code="llm_rejected",
+            )
         try:
-            with httpx.Client(timeout=self.timeout_seconds) as client:
-                response = client.post(self._endpoint(), headers=headers, json=attempt_body)
-                if response.status_code >= 400 and "response_format" in attempt_body:
-                    # Some local servers reject response_format; retry without it once.
-                    fallback = {k: v for k, v in attempt_body.items() if k != "response_format"}
-                    response = client.post(self._endpoint(), headers=headers, json=fallback)
-                response.raise_for_status()
-                data = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ProviderUnavailable("The LLM endpoint could not be reached", code="llm_unreachable") from exc
+            data = response.json()
+        except ValueError as exc:
+            raise ProviderUnavailable(
+                "The LLM endpoint returned a non-JSON response", code="llm_bad_response"
+            ) from exc
 
         content = ""
         try:
             content = data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderUnavailable("The LLM endpoint returned an unexpected response", code="llm_bad_response") from exc
+            raise ProviderUnavailable(
+                "The LLM endpoint returned an unexpected response", code="llm_bad_response"
+            ) from exc
 
-        return _parse_json(content)
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        meta = {
+            "provider": self.provider_id,
+            "model": self.model,
+            "privacy": self.privacy,
+            "attempts": attempt,
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }
+        return _parse_json(content), meta
+
+    def probe(self, timeout_seconds: float = 3.0) -> tuple[bool, str]:
+        """Cheap liveness check that does not generate tokens.
+
+        A server that does not expose ``/models`` is reported as configured but
+        unverified rather than healthy: the editor must not claim a model ran.
+        """
+        base = self.base_url.rstrip("/")
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        url = f"{base}/models"
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            with httpx.Client(timeout=timeout_seconds) as client:
+                response = client.get(url, headers=headers)
+            if response.status_code < 400:
+                return True, "Endpoint answered the model list"
+            return False, f"Endpoint answered {response.status_code} for its model list"
+        except httpx.HTTPError as exc:
+            return False, f"Endpoint unreachable: {type(exc).__name__}"
 
     def _validate(self, parsed: dict, clips: list[ScorableClip]) -> LlmScoringResult:
         if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):

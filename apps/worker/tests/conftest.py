@@ -32,6 +32,7 @@ def make_settings(data_dir: Path) -> Settings:
         llm_model="",
         llm_api_key="",
         llm_timeout_seconds=30,
+        export_dir=data_dir.parent / "exports",
     )
 
 

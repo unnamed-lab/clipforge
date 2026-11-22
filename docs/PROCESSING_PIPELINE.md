@@ -2,6 +2,9 @@
 
 Every stage below is implemented in `apps/worker/src/clipforge`. Each stage reports real progress; none of them estimate progress from elapsed time.
 
+For the project-level automatic workflow that sequences these stages, reviews the
+rendered file and versions exports, see [Automatic production](PROJECT_PIPELINE.md).
+
 ## 0. Import
 
 ### Local upload

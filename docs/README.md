@@ -22,6 +22,7 @@ This index separates current reference material from dated implementation record
 | [Known limitations](KNOWN_LIMITATIONS.md) | Absent capabilities, operational constraints, verification policy | Current |
 | [Architecture](ARCHITECTURE.md) | Service boundaries, storage rules, job model, security | Core shape current; data model predates later tables |
 | [Processing pipeline](PROCESSING_PIPELINE.md) | Import through render and cleanup | Current for the core analysis path; editorial and packaging stages are documented separately |
+| [Automatic production](PROJECT_PIPELINE.md) | Project run stages, provider policy, rendered-output review, bounded repairs, timeouts, export versions and manifest | Current |
 | [Video enhancement](ENHANCEMENT.md) | Enhancement audit, model/licence evaluation, geometry, cache, measured throughput and limits | Current |
 | [Render performance](PERFORMANCE.md) | Benchmark workload, per-stage timings, 5 ms/frame verdict, optimisations and regression gate | Current |
 | [Environment variables](deployment/ENVIRONMENT_VARIABLES.md) | Every supported setting | Authoritative |
@@ -42,6 +43,7 @@ These documents record a point-in-time investigation. They are useful evidence a
 | [AI packaging trend check](quality/AI_PACKAGING_TREND_CHECK.md) | Trend-provider policy and fallbacks; packaging sections superseded by the document above. |
 | [First export failure analysis](quality/FIRST_EXPORT_FAILURE_ANALYSIS.md) | Composition, caption bounds, boundary review, EDL and validation work prompted by the first failed export. |
 | [Video skills integration audit](quality/VIDEO_SKILLS_INTEGRATION_AUDIT.md) | Which external video-production techniques were adopted, adapted or rejected. |
+| [Autonomous pipeline audit](quality/AUTONOMOUS_PIPELINE_AUDIT.md) | Repository audit, capability classification and root causes before project orchestration was added (2026-11-21). |
 | [Deployment audit](deployment/DEPLOYMENT_AUDIT.md) | Hosted deployment findings at the date recorded. |
 | [Implementation plan](IMPLEMENTATION_PLAN.md) | Original sprint plan and milestone checklist (2026-11-15). Its status line is historical. |
 

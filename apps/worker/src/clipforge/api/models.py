@@ -159,6 +159,58 @@ class TrendCheckBody(BaseModel):
     settings: dict | None = None
 
 
+class AutoproduceRequest(BaseModel):
+    """Minimal automatic production request; every field has a safe default."""
+
+    clip_count: int = Field(default=5, ge=1, le=30)
+    goal: Literal[
+        "best_moments", "social_clips", "educational", "funny", "debate",
+        "emotional_stories", "tutorials", "highlights", "condensed", "custom",
+    ] = "best_moments"
+    duration_band: Literal["auto", "short", "medium", "long"] = "auto"
+    quality: Literal["fast", "balanced", "best"] = "balanced"
+    language: str | None = Field(default=None, max_length=12)
+    platform: Literal["auto", "portrait_short", "landscape", "square"] = "auto"
+    tone: str | None = Field(default=None, max_length=120)
+    duration_preference_ms: int | None = Field(default=None, ge=2_000, le=900_000)
+    allow_extra_discovery: bool = True
+    use_model_review: bool = True
+    model_review_consent: bool = False
+    editorial_consent: bool = False
+    aspect: Literal["9:16", "16:9", "1:1"] | None = None
+    resolution: Literal[720, 1080, 1440, 2160] | None = None
+    resolution_mode: Literal["class", "source", "custom"] | None = None
+    custom_width: int | None = Field(default=None, ge=180, le=3840)
+    custom_height: int | None = Field(default=None, ge=180, le=4320)
+    composition: Literal["auto", "crop", "fit", "pip", "split", "stack", "facecam_focus", "manual"] | None = None
+    framing: Literal["crop", "blur"] | None = None
+    fps: int | None = Field(default=None, ge=15, le=60)
+    caption_preset: Literal["clean", "large", "minimal", "branded", "custom"] | None = None
+    captions_enabled: bool | None = None
+    captions_burn_in: bool | None = None
+    captions_sidecar: bool | None = None
+    captions: dict | None = None
+    normalize_audio: bool = False
+    enhancement: EnhancementSettings | None = None
+    compression: dict | None = None
+    face_cam_position: Literal["top", "bottom"] | None = None
+    face_cam_rect: Rect | None = None
+    face_cam_overrides: list[FaceCamOverride] = Field(default_factory=list)
+    stack_split_pct: float | None = Field(default=None, ge=35.0, le=80.0)
+    adaptive_stack: bool | None = None
+    crop_x_pct: float | None = Field(default=None, ge=0, le=100)
+    crop_y_pct: float | None = Field(default=None, ge=0, le=100)
+
+
+class ClipApprovalBody(BaseModel):
+    approved: bool = True
+    note: str | None = Field(default=None, max_length=400)
+
+
+class ExportSettingsBody(BaseModel):
+    export_dir: str | None = Field(default=None, max_length=500)
+
+
 class RenderRequest(BaseModel):
     candidate_id: str | None = None
     segments: list[dict] | None = None

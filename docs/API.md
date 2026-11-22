@@ -31,8 +31,9 @@ The FastAPI docs UI cannot attach a custom header by itself, so it is not a usab
 11. [Renders](#renders)
 12. [Packaging](#packaging)
 13. [Profiles and assets](#profiles-and-assets)
-14. [Library, evaluations and datasets](#library-evaluations-and-datasets)
-15. [End-to-end example](#end-to-end-example)
+14. [Automatic production](#automatic-production)
+15. [Library, evaluations and datasets](#library-evaluations-and-datasets)
+16. [End-to-end example](#end-to-end-example)
 
 ---
 
@@ -540,6 +541,107 @@ No user media is sent to any service by these routes.
 `GET /api/capabilities` includes the same model list under `enhancement`, with
 `profiles`, `devices` (`providers`, `gpu_inference`, `opencv_dnn_superres`),
 `gpu_required: false` and `frame_interpolation: false`.
+
+---
+
+## Automatic production
+
+One durable run performs analysis, editorial direction, per-clip configuration,
+rendering, review, bounded repair and packaging. Every stage is checkpointed.
+See [Automatic production pipeline](PROJECT_PIPELINE.md) for behaviour and
+limits.
+
+### Start
+
+```http
+POST /api/projects/{project_id}/autoproduce
+Content-Type: application/json
+
+{
+  "clip_count": 5,
+  "platform": "auto",
+  "allow_extra_discovery": true,
+  "use_model_review": true
+}
+```
+
+Every field is optional. The only required input is an imported source. An
+active run is returned unchanged (`reused: true`); a run interrupted by a worker
+restart is resumed from its last checkpoint.
+
+Render-shaping fields mirror `RenderRequest` (`aspect`, `resolution`,
+`resolution_mode`, `custom_width`, `custom_height`, `composition`, `framing`,
+`captions_enabled`, `caption_preset`, `compression`, `enhancement`, face-cam
+overrides). Omitted fields use project/profile defaults; explicit fields win.
+
+Response: `{ run, job, reused }`.
+
+### Read
+
+```http
+GET /api/projects/{project_id}/pipeline
+GET /api/pipeline/{run_id}
+```
+
+Returns the run, every stage (`label`, `status`, `progress`, `message`,
+`attempt`, `error`), clips with their review findings and repair history, exact
+clip counts, the current job and the project manifest summary. Progress is
+worker-reported, not estimated.
+
+### Cancel and resume
+
+```http
+POST /api/pipeline/{run_id}/cancel
+POST /api/pipeline/{run_id}/retry
+```
+
+`retry` keeps completed stages, resets only failed/interrupted stages, and
+requeues the run. It never deletes previous exports.
+
+### Review a clip
+
+```http
+POST /api/pipeline/{run_id}/clips/{clip_id}/approve
+
+{ "approved": true, "note": "Ending is intentional." }
+```
+
+Only a completed render with a passing technical gate can be approved. Approval
+records the user, note and time; it does not hide the findings.
+
+### Exports and manifest
+
+```http
+GET  /api/projects/{project_id}/exports
+GET  /api/projects/{project_id}/manifest
+GET  /api/exports/{render_id}
+POST /api/exports/{render_id}/save
+POST /api/projects/{project_id}/exports/save
+DELETE /api/exports/{render_id}
+DELETE /api/pipeline/{run_id}/clips/{clip_id}?delete_exports=false
+GET  /api/projects/{project_id}/export-settings
+PUT  /api/projects/{project_id}/export-settings
+```
+
+Exports expose stable `asset_id`, filename, version, current/superseded state,
+checksum, EDL version, review status, download URL and any copies already saved
+to the export folder. Superseded versions stay downloadable. Deleting a clip
+removes it from the production list and keeps its exports unless
+`delete_exports=true` is passed explicitly. Deleting an export removes the
+app-stored file and row; copies in the user's export folder are not touched.
+
+The manifest never contains filesystem paths or private storage keys.
+
+A completed render's download uses its readable filename, for example
+`customer-perspective__hook-first__portrait__v001.mp4`.
+
+### Export folder
+
+`PUT /api/projects/{id}/export-settings` accepts `{ "export_dir": "/absolute/path" }`
+or `{ "export_dir": null }` to reset. The worker creates a project subfolder
+inside it and copies every passed or approved clip there. Without a project
+override, the default is `~/Documents/Clipforge`. Relative paths, drive roots
+and system folders are refused.
 
 ---
 

@@ -11,6 +11,7 @@ from clipforge.jobs.queue import JobContext
 from clipforge.media.importer import download_remote, progress_band
 from clipforge.media.process import ProcessCancelled
 from clipforge.pipeline.analysis import run_analysis
+from clipforge.pipeline.orchestrator import run_project_pipeline
 from clipforge.rendering.service import perform_render
 from clipforge.security.urls import validate_and_resolve
 
@@ -151,6 +152,22 @@ def handle_model_install(ctx: JobContext) -> dict:
     )
 
 
+def handle_autoproduce(ctx: JobContext) -> dict:
+    payload = ctx.job.get("payload") or {}
+    run_id = payload.get("run_id")
+    if not run_id:
+        raise JobFailed("invalid_job", "This job is missing its production run.")
+    try:
+        ctx.repos.project_runs.get(run_id)
+    except Exception as exc:
+        raise JobFailed("invalid_job", "That production run no longer exists.") from exc
+    # The job carries its own hard deadline so a restart cannot extend it
+    # indefinitely. The orchestrator also checks this value.
+    ctx.repos.jobs.set_deadline(ctx.job["id"], ctx.settings.pipeline_deadline_seconds)
+    ctx.repos.project_runs.mark_resumed(run_id)
+    return run_project_pipeline(ctx, run_id)
+
+
 def build_handlers(repos: Repositories) -> dict:
     return {
         "analysis": handle_analysis,
@@ -158,4 +175,5 @@ def build_handlers(repos: Repositories) -> dict:
         "render": handle_render,
         "url_import": handle_url_import,
         "model_install": handle_model_install,
+        "autoproduce": handle_autoproduce,
     }

@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     result_json      TEXT,
     metrics_json     TEXT NOT NULL DEFAULT '{}',
     cancel_requested INTEGER NOT NULL DEFAULT 0,
+    heartbeat_at     TEXT,
+    deadline_at      TEXT,
     created_at       TEXT NOT NULL,
     started_at       TEXT,
     finished_at      TEXT
@@ -158,11 +160,115 @@ CREATE TABLE IF NOT EXISTS renders (
     error_code    TEXT,
     error_message TEXT,
     review_json   TEXT NOT NULL DEFAULT '{}',
+    version       INTEGER NOT NULL DEFAULT 1,
+    display_name  TEXT,
+    spec_hash     TEXT,
+    source_identity TEXT,
+    checksum      TEXT,
+    superseded    INTEGER NOT NULL DEFAULT 0,
+    run_id        TEXT,
+    clip_id       TEXT,
+    edl_version   INTEGER NOT NULL DEFAULT 1,
+    review_status TEXT,
     created_at    TEXT NOT NULL,
     finished_at   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_renders_project ON renders(project_id, created_at DESC);
+
+-- One autonomous production run per attempt. Stages and clips are separate rows
+-- so a worker restart resumes from the last completed checkpoint rather than
+-- restarting analysis or rendering.
+CREATE TABLE IF NOT EXISTS project_runs (
+    id               TEXT PRIMARY KEY,
+    project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    status           TEXT NOT NULL DEFAULT 'queued',
+    current_stage    TEXT,
+    progress         REAL NOT NULL DEFAULT 0,
+    message          TEXT NOT NULL DEFAULT '',
+    request_json     TEXT NOT NULL DEFAULT '{}',
+    settings_json    TEXT NOT NULL DEFAULT '{}',
+    provider_json    TEXT NOT NULL DEFAULT '{}',
+    error_code       TEXT,
+    error_message    TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    job_id           TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    started_at       TEXT,
+    finished_at      TEXT,
+    heartbeat_at     TEXT,
+    deadline_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_runs_project
+    ON project_runs(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_run_stages (
+    run_id        TEXT NOT NULL REFERENCES project_runs(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    attempt       INTEGER NOT NULL DEFAULT 0,
+    progress      REAL NOT NULL DEFAULT 0,
+    message       TEXT NOT NULL DEFAULT '',
+    output_json   TEXT NOT NULL DEFAULT '{}',
+    error_code    TEXT,
+    error_message TEXT,
+    started_at    TEXT,
+    finished_at   TEXT,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (run_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS project_run_clips (
+    id               TEXT PRIMARY KEY,
+    run_id           TEXT NOT NULL REFERENCES project_runs(id) ON DELETE CASCADE,
+    project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    candidate_id     TEXT REFERENCES candidates(id) ON DELETE SET NULL,
+    ordinal          INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    strategy         TEXT NOT NULL DEFAULT '',
+    edl_version      INTEGER NOT NULL DEFAULT 1,
+    render_id        TEXT REFERENCES renders(id) ON DELETE SET NULL,
+    repair_attempts  INTEGER NOT NULL DEFAULT 0,
+    technical_errors INTEGER NOT NULL DEFAULT 0,
+    findings_json    TEXT NOT NULL DEFAULT '[]',
+    history_json     TEXT NOT NULL DEFAULT '[]',
+    plan_json        TEXT NOT NULL DEFAULT '{}',
+    review_json      TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_run_clips_run
+    ON project_run_clips(run_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS director_cache (
+    cache_key    TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    result_json  TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+
+-- One row per copy of a valid render into the user's export folder. The same
+-- render may be saved to more than one destination; the row is provenance, not
+-- a second asset identity.
+CREATE TABLE IF NOT EXISTS export_saves (
+    id              TEXT PRIMARY KEY,
+    render_id       TEXT NOT NULL REFERENCES renders(id) ON DELETE CASCADE,
+    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    directory       TEXT NOT NULL,
+    filename        TEXT NOT NULL,
+    checksum        TEXT,
+    size_bytes      INTEGER,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_export_saves_target
+    ON export_saves(render_id, directory, filename);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,

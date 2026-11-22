@@ -110,6 +110,31 @@ The score is an **estimated editorial quality from transcript features**, not a 
 
 ---
 
+## 3.1 Produce clips automatically
+
+With a source imported, the **Automatic production** panel runs the whole project:
+
+1. Reuses or creates the transcript and candidate moments.
+2. Lets the editorial director choose clips and strategies, or uses the deterministic planner when no model is configured.
+3. Configures each clip from the project/client-profile defaults. **Options** exposes only clip count and frame; everything else stays automatic unless you override it later.
+4. Renders each clip, checks the actual file and repairs supported defects within a bounded loop.
+5. Lists each clip with its findings, repair history, review status and current export version.
+
+Controls:
+
+- **Cancel** stops the run between clips and inside FFmpeg. Completed stages and valid exports are kept.
+- **Resume** continues a failed or interrupted run from its last completed stage. It does not redo transcription when the transcript is still valid.
+- **Approve** records your decision on a clip that still needs review. It is only available for a completed render whose technical gate passed. Approving also copies the file to the project export folder.
+- **Remove** deletes a clip from the production list without deleting its export versions. Delete a specific export from **Export versions** if you also want the app-stored file gone. A copy already written to the export folder is left alone.
+- **Save all** copies every current export to the export folder. **Save** on one version does the same for that file.
+- **Export folder** is configurable in **Options**. The default is `Documents/Clipforge/<project>/`; relative paths and system folders are refused.
+- **Produce again** starts a new run. Identical edits reuse the current export instead of duplicating it; a changed edit creates a new version.
+- **Preview/MP4** use the same stored render that passed review.
+
+Progress is reported by the worker, stage by stage. The panel never shows a success state before the final technical checks pass. A model-generated review note is labelled as such and never treated as a virality or audience score.
+
+---
+
 ## 4. Review candidates
 
 The candidate rail lists every proposal, ordered by rank or by position in the source.

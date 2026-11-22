@@ -246,6 +246,7 @@ def perform_render(
     on_stage: StageCallback,
     cancel_event: threading.Event,
     should_cancel: Callable[[], bool],
+    timeout_seconds: float = 2_400,
 ) -> dict:
     render_started = time.monotonic()
     stage_timings: dict[str, float] = {}
@@ -418,7 +419,7 @@ def perform_render(
         on_stage("rendering", render_start + percent * (render_span / 100), "Encoding video")
 
     try:
-        outcome = execute(command, cancel=cancel_event, on_progress=handle_progress, timeout_seconds=2400)
+        outcome = execute(command, cancel=cancel_event, on_progress=handle_progress, timeout_seconds=timeout_seconds)
     except ProcessCancelled:
         raise
     except (TimeoutError, RuntimeError) as exc:

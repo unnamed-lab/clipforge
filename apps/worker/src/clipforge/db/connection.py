@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 
 # Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
 # so startup applies each one only when it is missing.
@@ -40,6 +40,16 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "edit_spec_id": "TEXT",
         "subtitle_path": "TEXT",
         "review_json": "TEXT NOT NULL DEFAULT '{}'",
+        "version": "INTEGER NOT NULL DEFAULT 1",
+        "display_name": "TEXT",
+        "spec_hash": "TEXT",
+        "source_identity": "TEXT",
+        "checksum": "TEXT",
+        "superseded": "INTEGER NOT NULL DEFAULT 0",
+        "run_id": "TEXT",
+        "clip_id": "TEXT",
+        "edl_version": "INTEGER NOT NULL DEFAULT 1",
+        "review_status": "TEXT",
     },
     "sources": {
         "has_video": "INTEGER NOT NULL DEFAULT 1",
@@ -49,6 +59,8 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "jobs": {
         "metrics_json": "TEXT NOT NULL DEFAULT '{}'",
         "next_attempt_at": "TEXT",
+        "heartbeat_at": "TEXT",
+        "deadline_at": "TEXT",
     },
 }
 
@@ -94,11 +106,22 @@ class Database:
         with self.session() as conn:
             conn.executescript(schema)
             self._apply_column_migrations(conn)
+            self._ensure_indexes(conn)
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (SCHEMA_VERSION,),
             )
+
+    @staticmethod
+    def _ensure_indexes(conn: sqlite3.Connection) -> None:
+        """Indexes over migrated columns must follow the ALTER TABLE pass."""
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_renders_spec ON renders(project_id, spec_hash, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_renders_run ON renders(run_id, clip_id)"
+        )
 
     @staticmethod
     def _apply_column_migrations(conn: sqlite3.Connection) -> None:

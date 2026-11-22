@@ -99,6 +99,15 @@ class ProjectRepository:
         with self.db.session() as conn:
             conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (utc_now(), project_id))
 
+    def set_export_dir(self, project_id: str, export_dir: str | None) -> dict:
+        project = self.get(project_id)
+        settings = dict(project.get("settings") or {})
+        if export_dir:
+            settings["export_dir"] = export_dir
+        else:
+            settings.pop("export_dir", None)
+        return self.update(project_id, settings=settings)
+
     def set_extension(self, project_id: str, *, profile_id: str | None | object = _UNSET,
                       overrides: dict | None = None, brief: dict | None = None) -> dict:
         assignments: list[str] = []
@@ -836,10 +845,11 @@ class JobRepository:
                         (utc_now(), row["id"]),
                     )
                     counts["cancelled"] += 1
-                elif row["type"] == "url_import":
+                elif row["type"] in {"url_import", "autoproduce"}:
                     conn.execute(
                         "UPDATE jobs SET state = 'queued', stage = 'queued', progress = 0,"
-                        " message = 'Resuming after a worker restart', started_at = NULL"
+                        " message = 'Resuming after a worker restart', started_at = NULL,"
+                        " heartbeat_at = NULL, deadline_at = NULL"
                         " WHERE id = ?",
                         (row["id"],),
                     )
@@ -861,6 +871,41 @@ class JobRepository:
                 "UPDATE jobs SET metrics_json = ? WHERE id = ?", (json.dumps(metrics), job_id)
             )
 
+    def heartbeat(self, job_id: str) -> None:
+        """Record liveness without touching the user-visible progress text."""
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE jobs SET heartbeat_at = ? WHERE id = ? AND state = 'running'",
+                (utc_now(), job_id),
+            )
+
+    def set_deadline(self, job_id: str, seconds: float) -> None:
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE jobs SET heartbeat_at = ?, deadline_at = ? WHERE id = ?",
+                (utc_now(), utc_after(max(0.0, seconds)), job_id),
+            )
+
+    def stale_running(self, *, older_than_seconds: float) -> list[dict]:
+        """Running jobs whose heartbeat is older than the stall threshold."""
+        cutoff = utc_after(-max(1.0, older_than_seconds))
+        with self.db.session() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'running' AND heartbeat_at IS NOT NULL"
+                " AND heartbeat_at < ?",
+                (cutoff,),
+            ).fetchall()
+        return [serialise_job(dict(row)) for row in rows]
+
+    def past_deadline(self) -> list[dict]:
+        with self.db.session() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'running' AND deadline_at IS NOT NULL"
+                " AND deadline_at <= ?",
+                (utc_now(),),
+            ).fetchall()
+        return [serialise_job(dict(row)) for row in rows]
+
 
 
 # ---------------------------------------------------------------------------- renders
@@ -873,6 +918,7 @@ def serialise_render(row: dict) -> dict:
     data["review"] = _loads(data.pop("review_json", None), {})
     data.pop("relative_path", None)
     data["download_url"] = f"/api/renders/{data['id']}/download" if data.get("status") == "completed" else None
+    data["superseded"] = bool(data.get("superseded"))
     return data
 
 
@@ -882,16 +928,70 @@ class RenderRepository:
 
     def create(self, *, project_id: str, job_id: str | None, candidate_id: str | None, spec: dict,
                status: str = "queued", kind: str = "export", profile_snapshot: dict | None = None,
-               edit_spec_id: str | None = None) -> dict:
+               edit_spec_id: str | None = None, version: int | None = None,
+               display_name: str | None = None, spec_hash: str | None = None,
+               source_identity: str | None = None, run_id: str | None = None,
+               clip_id: str | None = None, edl_version: int = 1) -> dict:
         render_id = new_id()
         with self.db.session() as conn:
+            resolved = version
+            if resolved is None:
+                resolved = self._next_version(conn, project_id)
             conn.execute(
                 "INSERT INTO renders(id, project_id, job_id, candidate_id, spec_json, status, kind,"
-                " profile_snapshot_json, edit_spec_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                " profile_snapshot_json, edit_spec_id, version, display_name, spec_hash, source_identity,"
+                " run_id, clip_id, edl_version, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (render_id, project_id, job_id, candidate_id, json.dumps(spec), status, kind,
-                 json.dumps(profile_snapshot or {}), edit_spec_id, utc_now()),
+                 json.dumps(profile_snapshot or {}), edit_spec_id, int(resolved), display_name,
+                 spec_hash, source_identity, run_id, clip_id, int(edl_version), utc_now()),
             )
         return self.get(render_id)
+
+    @staticmethod
+    def _next_version(conn, project_id: str) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS current FROM renders WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return int(row["current"] if row else 0) + 1
+
+    def next_version(self, project_id: str) -> int:
+        with self.db.session() as conn:
+            return self._next_version(conn, project_id)
+
+    def find_reusable(self, project_id: str, *, spec_hash: str, source_identity: str | None) -> dict | None:
+        """A completed render with the same edit and processing settings.
+
+        Superseded renders are excluded: they remain downloadable but a new run
+        should recover the current deliverable, not resurrect a retired one.
+        """
+        clauses = ["project_id = ?", "spec_hash = ?", "status = 'completed'", "superseded = 0"]
+        values: list[Any] = [project_id, spec_hash]
+        if source_identity:
+            clauses.append("source_identity = ?")
+            values.append(source_identity)
+        with self.db.session() as conn:
+            row = conn.execute(
+                f"SELECT * FROM renders WHERE {' AND '.join(clauses)}"
+                " ORDER BY created_at DESC LIMIT 1",
+                values,
+            ).fetchone()
+        return serialise_render(dict(row)) if row else None
+
+    def mark_superseded(self, project_id: str, candidate_id: str | None, keep_render_id: str) -> int:
+        """Retire older current exports for the same candidate, never delete them."""
+        clauses = ["project_id = ?", "id != ?", "status = 'completed'", "superseded = 0"]
+        values: list[Any] = [project_id, keep_render_id]
+        if candidate_id:
+            clauses.append("candidate_id = ?")
+            values.append(candidate_id)
+        with self.db.session() as conn:
+            result = conn.execute(
+                f"UPDATE renders SET superseded = 1 WHERE {' AND '.join(clauses)}", values
+            )
+            return int(result.rowcount or 0)
+
 
     def get(self, render_id: str) -> dict:
         with self.db.session() as conn:
@@ -922,12 +1022,15 @@ class RenderRepository:
         return [dict(r) for r in rows]
 
     def mark_completed(self, render_id: str, *, relative_path: str, size_bytes: int, duration_ms: int,
-                       width: int, height: int, subtitle_path: str | None = None) -> None:
+                       width: int, height: int, subtitle_path: str | None = None,
+                       checksum: str | None = None, review_status: str | None = None) -> None:
         with self.db.session() as conn:
             conn.execute(
                 "UPDATE renders SET status = 'completed', relative_path = ?, size_bytes = ?, duration_ms = ?,"
-                " width = ?, height = ?, subtitle_path = ?, finished_at = ? WHERE id = ?",
-                (relative_path, size_bytes, duration_ms, width, height, subtitle_path, utc_now(), render_id),
+                " width = ?, height = ?, subtitle_path = ?, checksum = COALESCE(?, checksum),"
+                " review_status = COALESCE(?, review_status), finished_at = ? WHERE id = ?",
+                (relative_path, size_bytes, duration_ms, width, height, subtitle_path, checksum,
+                 review_status, utc_now(), render_id),
             )
 
     def update_spec(self, render_id: str, spec: dict) -> None:
@@ -941,6 +1044,16 @@ class RenderRepository:
             conn.execute(
                 "UPDATE renders SET review_json = ? WHERE id = ?", (json.dumps(review), render_id)
             )
+
+    def set_review_status(self, render_id: str, status: str) -> None:
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE renders SET review_status = ? WHERE id = ?", (status, render_id)
+            )
+
+    def set_checksum(self, render_id: str, checksum: str) -> None:
+        with self.db.session() as conn:
+            conn.execute("UPDATE renders SET checksum = ? WHERE id = ?", (checksum, render_id))
 
     def mark_failed(self, render_id: str, code: str, message: str) -> None:
         with self.db.session() as conn:
@@ -963,6 +1076,19 @@ class RenderRepository:
             conn.execute(
                 "UPDATE renders SET status = 'cancelled', finished_at = ? WHERE id = ?", (utc_now(), render_id)
             )
+
+    def list_for_clip(self, clip_id: str) -> list[dict]:
+        with self.db.session() as conn:
+            rows = conn.execute(
+                "SELECT * FROM renders WHERE clip_id = ? ORDER BY created_at", (clip_id,)
+            ).fetchall()
+        return [serialise_render(dict(row)) for row in rows]
+
+    def delete(self, render_id: str) -> dict:
+        raw = self.get_raw(render_id)
+        with self.db.session() as conn:
+            conn.execute("DELETE FROM renders WHERE id = ?", (render_id,))
+        return raw
 
 
 class Repositories:
@@ -993,6 +1119,19 @@ class Repositories:
         self.candidates = CandidateRepository(db)
         self.jobs = JobRepository(db)
         self.renders = RenderRepository(db)
+        from clipforge.db.pipeline import (
+            DirectorCacheRepository,
+            ExportSaveRepository,
+            ProjectClipRepository,
+            ProjectRunRepository,
+            ProjectStageRepository,
+        )
+
+        self.project_runs = ProjectRunRepository(db)
+        self.project_stages = ProjectStageRepository(db)
+        self.project_clips = ProjectClipRepository(db)
+        self.director_cache = DirectorCacheRepository(db)
+        self.export_saves = ExportSaveRepository(db)
         self.profiles = ProfileRepository(db)
         self.assets = BrandAssetRepository(db)
         self.briefs = BriefRepository(db)

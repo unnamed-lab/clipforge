@@ -22,6 +22,7 @@ from clipforge.api import (
     routes_renders,
     routes_sources,
     routes_system,
+    routes_pipeline,
 )
 from clipforge.api.deps import AppState
 from clipforge.config import Settings, load_settings
@@ -133,6 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(routes_analysis.router)
     app.include_router(routes_discovery.router)
     app.include_router(routes_renders.router)
+    app.include_router(routes_pipeline.router)
     app.include_router(routes_enhancement.router)
     app.include_router(routes_library.router)
     app.include_router(routes_packaging.router)

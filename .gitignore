@@ -27,6 +27,7 @@ tests/fixtures/generated/
 .playwright-mcp/
 test-results/
 playwright-report/
+/tmp/
 
 # Local env and secrets
 .env

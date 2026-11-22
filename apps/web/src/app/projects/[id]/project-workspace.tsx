@@ -14,7 +14,9 @@ import {
 import type {
   Capabilities,
   Candidate,
+  ExportList,
   Job,
+  PipelineState,
   ProjectDetail,
   Transcript,
 } from "@clipforge/shared";
@@ -26,6 +28,7 @@ import { AnalysisPanel } from "./analysis-panel";
 import { CandidateRail } from "./candidate-rail";
 import { ClipEditor, type CandidatePatch } from "./clip-editor";
 import { DiscoveryCounts, DiscoveryPanel } from "./discovery-panel";
+import { ProductionPanel } from "./production-panel";
 import { SourceImporter } from "./source-importer";
 
 const ACTIVE_STATES = new Set(["queued", "running", "waiting"]);
@@ -34,14 +37,20 @@ export function ProjectWorkspace({
   detail: initialDetail,
   capabilities,
   transcript: initialTranscript,
+  pipeline: initialPipeline,
+  exports: initialExports,
 }: {
   detail: ProjectDetail;
   capabilities: Capabilities | null;
   transcript: Transcript | null;
+  pipeline: PipelineState | null;
+  exports: ExportList | null;
 }) {
   const router = useRouter();
   const [detail, setDetail] = useState(initialDetail);
   const [transcript, setTranscript] = useState(initialTranscript);
+  const [pipeline, setPipeline] = useState(initialPipeline);
+  const [exports, setExports] = useState(initialExports);
   const [selectedId, setSelectedId] = useState<string | null>(initialDetail.candidates[0]?.id ?? null);
   const [showRerun, setShowRerun] = useState(false);
   const [showDiscovery, setShowDiscovery] = useState(false);
@@ -74,8 +83,14 @@ export function ProjectWorkspace({
 
   const refresh = useCallback(async () => {
     try {
-      const next = await apiJson<ProjectDetail>(`/api/projects/${projectId}`);
+      const [next, nextPipeline, nextExports] = await Promise.all([
+        apiJson<ProjectDetail>(`/api/projects/${projectId}`),
+        apiJson<PipelineState>(`/api/projects/${projectId}/pipeline`).catch(() => null),
+        apiJson<ExportList>(`/api/projects/${projectId}/exports`).catch(() => null),
+      ]);
       setDetail(next);
+      if (nextPipeline) setPipeline(nextPipeline);
+      if (nextExports) setExports(nextExports);
       setError(null);
       if (next.source) {
         const media = await apiJson<{ waveform: boolean }>(`/api/projects/${projectId}/media`).catch(
@@ -353,6 +368,16 @@ export function ProjectWorkspace({
       ) : null}
 
       {source ? <SourceFacts detail={detail} /> : null}
+
+      {source ? (
+        <ProductionPanel
+          projectId={projectId}
+          pipeline={pipeline}
+          exports={exports}
+          candidates={detail.candidates}
+          onRefresh={refresh}
+        />
+      ) : null}
 
       {source && source.has_audio && detail.candidates.length > 0 ? (
         <div ref={discoveryRef} className="space-y-2">

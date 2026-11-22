@@ -938,8 +938,175 @@ export const renderSchema = z
   .passthrough();
 export type Render = z.infer<typeof renderSchema>;
 
-export const transcriptWordSchema = z.object({
-  start_ms: z.number(),
+export const productionRunSchema = z
+  .object({
+    id: z.string(),
+    project_id: z.string(),
+    status: z.enum([
+      "queued",
+      "running",
+      "retrying",
+      "awaiting_review",
+      "partially_completed",
+      "completed",
+      "cancelled",
+      "failed",
+    ]),
+    current_stage: z.string().nullable().optional(),
+    progress: z.number(),
+    message: z.string().default(""),
+    request: z.record(z.string(), z.unknown()).default({}),
+    provider: z.record(z.string(), z.unknown()).default({}),
+    error_code: z.string().nullable().optional(),
+    error_message: z.string().nullable().optional(),
+    cancel_requested: z.boolean().default(false),
+    job_id: z.string().nullable().optional(),
+    created_at: z.string(),
+    updated_at: z.string().optional(),
+    started_at: z.string().nullable().optional(),
+    finished_at: z.string().nullable().optional(),
+  })
+  .passthrough();
+export type ProductionRun = z.infer<typeof productionRunSchema>;
+
+export const productionStageSchema = z
+  .object({
+    name: z.string(),
+    label: z.string(),
+    status: z.enum(["pending", "running", "completed", "failed", "skipped"]),
+    progress: z.number().default(0),
+    message: z.string().default(""),
+    attempt: z.number().default(0),
+    error: z.string().nullable().optional(),
+    started_at: z.string().nullable().optional(),
+    finished_at: z.string().nullable().optional(),
+  })
+  .passthrough();
+export type ProductionStage = z.infer<typeof productionStageSchema>;
+
+export const productionFindingSchema = z
+  .object({
+    id: z.string(),
+    severity: z.enum(["blocking", "warning", "info"]),
+    category: z.enum(["editorial", "visual", "audio", "technical"]),
+    title: z.string(),
+    detail: z.string().default(""),
+    output_range: z
+      .object({ start_ms: z.number(), end_ms: z.number() })
+      .nullable()
+      .optional(),
+    source_range: z
+      .object({ start_ms: z.number(), end_ms: z.number() })
+      .nullable()
+      .optional(),
+    evidence: z.array(z.string()).default([]),
+    confidence: z.number().nullable().optional(),
+    auto_repairable: z.boolean().default(false),
+    proposed_repair: z.record(z.string(), z.unknown()).nullable().optional(),
+    validation: z.string().default(""),
+    origin: z.string().optional(),
+  })
+  .passthrough();
+export type ProductionFinding = z.infer<typeof productionFindingSchema>;
+
+export const productionReviewSchema = z
+  .object({
+    version: z.number().optional(),
+    status: z.string().optional(),
+    summary: z.string().default(""),
+    findings: z.array(productionFindingSchema).default([]),
+    checks: z.array(z.record(z.string(), z.unknown())).default([]),
+    gate_status: z.string().nullable().optional(),
+    gate_summary: z.string().nullable().optional(),
+    model_review: z.record(z.string(), z.unknown()).default({}),
+    approved_by_user: z.boolean().optional(),
+    remaining_warnings: z.array(z.string()).default([]),
+  })
+  .passthrough();
+export type ProductionReview = z.infer<typeof productionReviewSchema>;
+
+export const productionClipSchema = z
+  .object({
+    id: z.string(),
+    candidate_id: z.string().nullable(),
+    ordinal: z.number(),
+    status: z.string(),
+    strategy: z.string().default(""),
+    edl_version: z.number().default(1),
+    render_id: z.string().nullable(),
+    repair_attempts: z.number().default(0),
+    technical_errors: z.number().default(0),
+    findings: z.array(productionFindingSchema).default([]),
+    review: productionReviewSchema.default({ summary: "", findings: [], checks: [], model_review: {}, remaining_warnings: [] }),
+    plan: z.record(z.string(), z.unknown()).default({}),
+    history: z.array(z.record(z.string(), z.unknown())).default([]),
+  })
+  .passthrough();
+export type ProductionClip = z.infer<typeof productionClipSchema>;
+
+export const exportSaveSchema = z
+  .object({
+    filename: z.string(),
+    directory: z.string(),
+    checksum: z.string().nullable().optional(),
+    size_bytes: z.number().nullable().optional(),
+    saved_at: z.string().nullable().optional(),
+    render_id: z.string().optional(),
+  })
+  .passthrough();
+export type ExportSave = z.infer<typeof exportSaveSchema>;
+
+export const exportAssetSchema = z
+  .object({
+    asset_id: z.string(),
+    render_id: z.string(),
+    project_id: z.string(),
+    filename: z.string(),
+    version: z.number(),
+    status: z.string().nullable(),
+    current: z.boolean(),
+    superseded: z.boolean(),
+    review_status: z.string().nullable().optional(),
+    strategy: z.string().nullable().optional(),
+    edl_version: z.number().nullable().optional(),
+    size_bytes: z.number().nullable().optional(),
+    checksum: z.string().nullable().optional(),
+    duration_ms: z.number().nullable().optional(),
+    width: z.number().nullable().optional(),
+    height: z.number().nullable().optional(),
+    created_at: z.string().nullable().optional(),
+    finished_at: z.string().nullable().optional(),
+    download_url: z.string().nullable().optional(),
+    review: z.record(z.string(), z.unknown()).default({}),
+    saved: z.array(exportSaveSchema).default([]),
+  })
+  .passthrough();
+export type ExportAsset = z.infer<typeof exportAssetSchema>;
+
+export const pipelineStateSchema = z
+  .object({
+    run: productionRunSchema.nullable(),
+    stages: z.array(productionStageSchema).default([]),
+    clips: z.array(productionClipSchema).default([]),
+    counts: z.record(z.string(), z.number()).default({}),
+    job: jobSchema.nullable().optional(),
+    manifest: z.record(z.string(), z.unknown()).nullable().optional(),
+    capabilities: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
+export type PipelineState = z.infer<typeof pipelineStateSchema>;
+
+export const exportListSchema = z
+  .object({
+    project_id: z.string(),
+    exports: z.array(exportAssetSchema).default([]),
+    current: z.array(exportAssetSchema).default([]),
+    superseded: z.array(exportAssetSchema).default([]),
+  })
+  .passthrough();
+export type ExportList = z.infer<typeof exportListSchema>;
+
+export const transcriptWordSchema = z.object({  start_ms: z.number(),
   end_ms: z.number(),
   word: z.string(),
   probability: z.number().nullable().optional(),
