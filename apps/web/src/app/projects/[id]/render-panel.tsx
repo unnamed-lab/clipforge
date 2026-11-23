@@ -592,6 +592,32 @@ export function RenderPanel({
             typeof base.captions === "object" && base.captions !== null
               ? (base.captions as Record<string, unknown>)
               : {};
+          const baseExport =
+            typeof base.export === "object" && base.export !== null
+              ? (base.export as Record<string, unknown>)
+              : {};
+          // The saved mode is class/source/custom. A target mode such as "1080"
+          // belongs in `resolution`; writing it here makes automatic production
+          // reject every clip.
+          const exportOverrides: {
+            resolution_mode: "class" | "source" | "custom";
+            [key: string]: unknown;
+          } = {
+            ...baseExport,
+            compression: compressionBody,
+            resolution_mode: targetInfo.resolution_mode,
+            custom_width: targetInfo.custom_width,
+            custom_height: targetInfo.custom_height,
+            resolution,
+            enhancement,
+            composition,
+            face_cam_position: faceCamPosition,
+            stack_split_pct: stackSplit,
+            adaptive_stack: adaptiveStack,
+            face_cam_overrides: faceCamOverrides,
+            crop_x_pct: cropX,
+            crop_y_pct: cropY,
+          };
           await apiJson(`/api/projects/${projectId}/settings`, {
             method: "PATCH",
             body: {
@@ -605,24 +631,7 @@ export function RenderPanel({
                   alignment: captionAlignment,
                   margin_v: captionMarginV,
                 },
-                export: {
-                  ...(typeof base.export === "object" && base.export !== null
-                    ? (base.export as Record<string, unknown>)
-                    : {}),
-                  compression: compressionBody,
-                  resolution_mode: targetMode,
-                  custom_width: targetInfo.custom_width,
-                  custom_height: targetInfo.custom_height,
-                  resolution,
-                  enhancement,
-                  composition,
-                  face_cam_position: faceCamPosition,
-                  stack_split_pct: stackSplit,
-                  adaptive_stack: adaptiveStack,
-                  face_cam_overrides: faceCamOverrides,
-                  crop_x_pct: cropX,
-                  crop_y_pct: cropY,
-                },
+                export: exportOverrides,
               },
             },
           });
@@ -651,6 +660,7 @@ export function RenderPanel({
     settingsSnapshot,
     stackSplit,
     targetMode,
+    targetInfo.resolution_mode,
     targetInfo.custom_width,
     targetInfo.custom_height,
     resolution,

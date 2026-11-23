@@ -21,6 +21,7 @@ from clipforge.rendering.spec import (
     DEFAULT_CAPTION_POSITION,
     DEFAULT_CAPTION_POSITION_PCT,
     DEFAULT_CAPTION_PRESET,
+    RESOLUTION_CLASSES,
     FaceCamOverride,
     Rect,
 )
@@ -110,7 +111,10 @@ class CaptionPolicy(BaseModel):
 
 class ExportDefaults(BaseModel):
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
-    resolution: Literal[720, 1080] = 1080
+    resolution: Literal[720, 1080, 1440, 2160] = 1080
+    resolution_mode: Literal["class", "source", "custom"] = "class"
+    custom_width: int | None = Field(default=None, ge=320, le=3840)
+    custom_height: int | None = Field(default=None, ge=320, le=4320)
     fps: int | None = Field(default=30, ge=15, le=60)
     format: Literal["mp4"] = "mp4"
     normalise_audio: bool = True
@@ -217,6 +221,27 @@ def _merge_section(base: dict, override: dict) -> tuple[dict, list[str]]:
     return merged, overridden
 
 
+def normalise_export_values(values: dict) -> None:
+    """Repair legacy overrides that stored a class as the mode.
+
+    An earlier UI wrote ``resolution_mode: "1080"`` instead of
+    ``resolution: 1080, resolution_mode: "class"``. The project stayed usable
+    for manual renders that read the numeric mode, but automatic production
+    rejected it. Normalise on read and on write so existing projects recover
+    without a database edit and a stale client cannot reintroduce the value.
+    """
+    mode = values.get("resolution_mode")
+    if mode in (None, ""):
+        values["resolution_mode"] = "class"
+        return
+    if mode in {"class", "source", "custom"}:
+        return
+    text = str(mode).strip()
+    if text.isdigit() and int(text) in RESOLUTION_CLASSES:
+        values["resolution"] = int(text)
+        values["resolution_mode"] = "class"
+
+
 def resolve_settings(profile: dict | None, overrides: dict | None) -> dict:
     """Resolve effective settings and provenance.
 
@@ -253,6 +278,7 @@ def resolve_settings(profile: dict | None, overrides: dict | None) -> dict:
         "name": (profile or {}).get("name"),
         "version": (profile or {}).get("version"),
     }
+    normalise_export_values(effective["export"])
     return {"settings": effective, "provenance": provenance}
 
 

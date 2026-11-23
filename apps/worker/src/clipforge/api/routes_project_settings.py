@@ -8,7 +8,13 @@ from clipforge.api.deps import get_state
 from clipforge.api.models import BriefBody, CorrectionPatch, EditSpecBody, ProjectSettingsBody
 from clipforge.briefs.spec import ClippingBrief
 from clipforge.errors import NotFound, ValidationFailed
-from clipforge.profiles.spec import DEFAULT_PROFILE, ClientProfileDocument, profile_snapshot, resolve_settings
+from clipforge.profiles.spec import (
+    DEFAULT_PROFILE,
+    ClientProfileDocument,
+    normalise_export_values,
+    profile_snapshot,
+    resolve_settings,
+)
 from clipforge.rendering.spec import RenderSpec
 
 router = APIRouter(prefix="/api/projects", tags=["project settings"])
@@ -26,6 +32,20 @@ def _merge(base: dict, override: dict) -> dict:
         else:
             merged[key] = value
     return merged
+
+
+def _normalised_overrides(overrides: dict) -> dict:
+    """Repair legacy values before validation and storage.
+
+    A stale client can still send the old ``resolution_mode: "1080"`` shape.
+    Repairing it here keeps that save working and leaves the project row clean
+    for every later reader.
+    """
+    cleaned = copy.deepcopy(overrides)
+    export = cleaned.get("export")
+    if isinstance(export, dict):
+        normalise_export_values(export)
+    return cleaned
 
 
 def _validate_overrides(profile: dict | None, overrides: dict) -> None:
@@ -79,8 +99,8 @@ def patch_settings(project_id: str, payload: ProjectSettingsBody, request: Reque
 
     overrides = project.get("overrides") or {}
     if payload.overrides is not None:
-        _validate_overrides(profile, payload.overrides)
-        overrides = payload.overrides
+        overrides = _normalised_overrides(payload.overrides)
+        _validate_overrides(profile, overrides)
 
     updated = state.repos.projects.set_extension(
         project_id,

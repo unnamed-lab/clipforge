@@ -671,7 +671,14 @@ def _configuration(ctx: JobContext, run_id: str) -> dict:
     failed = 0
     for index, clip in enumerate(clips):
         _check_cancel(ctx, run_id)
-        if clip["status"] in {"failed", "needs_review"}:
+        # A retry re-enters this stage after the user fixed the export settings.
+        # Clips that failed only here have no spec to preserve, so re-attempt
+        # them; render failures and plan failures keep their existing verdict.
+        failed_configuration = any(
+            finding.get("id") == "configuration_invalid"
+            for finding in clip.get("findings") or []
+        )
+        if clip["status"] in {"failed", "needs_review"} and not failed_configuration:
             continue
         try:
             spec = _spec_for_clip(
@@ -714,6 +721,7 @@ def _configuration(ctx: JobContext, run_id: str) -> dict:
             strategy=str(plan.get("strategy") or ""),
             plan=plan,
             edl_version=1,
+            findings=[],
         )
         configured += 1
         _progress(

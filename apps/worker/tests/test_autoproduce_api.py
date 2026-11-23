@@ -306,6 +306,59 @@ def test_a_relative_export_folder_is_rejected(client, seeded):
 
 
 @pytest.mark.integration
+def test_retry_recovers_clips_that_failed_configuration(client, seeded):
+    # given a target that passes settings validation but cannot be configured
+    patched = client.patch(
+        f"/api/projects/{seeded['id']}/settings",
+        json={"overrides": {"export": {"resolution_mode": "custom", "resolution": 720}}},
+    )
+    assert patched.status_code == 200, patched.text
+    started = client.post(
+        f"/api/projects/{seeded['id']}/autoproduce",
+        json={
+            "clip_count": 1,
+            "allow_extra_discovery": False,
+            "use_model_review": False,
+            "aspect": "16:9",
+            "captions_enabled": False,
+        },
+    )
+    assert started.status_code == 200, started.text
+    failed_job = _wait_for_job(client, started.json()["job"]["id"])
+    assert failed_job["state"] == "failed"
+
+    state = client.get(f"/api/projects/{seeded['id']}/pipeline").json()
+    run_id = state["run"]["id"]
+    assert state["run"]["status"] == "failed"
+    assert state["clips"], state
+    assert all(clip["status"] == "failed" for clip in state["clips"])
+    assert all(
+        any(finding["id"] == "configuration_invalid" for finding in clip["findings"])
+        for clip in state["clips"]
+    )
+
+    # when the user fixes the setting and retries
+    fixed = client.patch(
+        f"/api/projects/{seeded['id']}/settings",
+        json={"overrides": {"export": {"resolution_mode": "class", "resolution": 720}}},
+    )
+    assert fixed.status_code == 200, fixed.text
+    retried = client.post(f"/api/pipeline/{run_id}/retry", headers=HEADERS)
+    assert retried.status_code == 200, retried.text
+    _wait_for_job(client, retried.json()["job"]["id"])
+
+    # then the clips that only failed configuration are rebuilt, not skipped
+    recovered = client.get(f"/api/projects/{seeded['id']}/pipeline").json()
+    assert recovered["run"]["status"] in {"completed", "partially_completed"}
+    assert recovered["clips"][0]["render_id"]
+    assert recovered["clips"][0]["status"] in {"passed", "passed_with_warnings"}
+    assert not any(
+        finding.get("id") == "configuration_invalid"
+        for finding in recovered["clips"][0]["findings"]
+    )
+
+
+@pytest.mark.integration
 def test_retry_resumes_after_the_last_completed_stage(client, seeded, repos, settings):
     # given a run that failed during analysis after source validation completed
     run = create_run(

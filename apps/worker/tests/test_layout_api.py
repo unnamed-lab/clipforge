@@ -166,6 +166,72 @@ def test_layout_settings_round_trip_through_project_overrides(client, project):
     assert export["face_cam_overrides"][0]["reason"] == "manual fix"
 
 
+def test_resolution_mode_round_trips_as_a_mode(client, project):
+    # given a target that is a class plus a mode, not the class in the mode field
+    body = {
+        "overrides": {
+            "export": {
+                "resolution": 1440,
+                "resolution_mode": "class",
+                "custom_width": None,
+                "custom_height": None,
+            }
+        }
+    }
+
+    # when
+    response = client.patch(f"/api/projects/{project['id']}/settings", json=body)
+
+    # then
+    assert response.status_code == 200, response.text
+    export = client.get(f"/api/projects/{project['id']}/settings").json()["resolved"]["export"]
+    assert export["resolution"] == 1440
+    assert export["resolution_mode"] == "class"
+
+
+def test_a_numeric_resolution_mode_is_repaired_when_saved(client, project):
+    # given the shape an earlier UI wrote by mistake
+    body = {"overrides": {"export": {"resolution": 1080, "resolution_mode": "1080"}}}
+
+    # when
+    response = client.patch(f"/api/projects/{project['id']}/settings", json=body)
+
+    # then the save succeeds and the stored row is clean for every reader
+    assert response.status_code == 200, response.text
+    loaded = client.get(f"/api/projects/{project['id']}/settings").json()
+    assert loaded["overrides"]["export"]["resolution_mode"] == "class"
+    assert loaded["overrides"]["export"]["resolution"] == 1080
+    assert loaded["resolved"]["export"]["resolution_mode"] == "class"
+
+
+def test_an_unknown_resolution_mode_is_rejected(client, project):
+    # given a mode that is not one of the three supported strategies
+    body = {"overrides": {"export": {"resolution": 1080, "resolution_mode": "auto"}}}
+
+    # when
+    response = client.patch(f"/api/projects/{project['id']}/settings", json=body)
+
+    # then
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_overrides"
+
+
+def test_legacy_numeric_resolution_mode_is_repaired_on_read(client, project, repos):
+    # given an existing project row written before the mode was validated
+    repos.projects.set_extension(
+        project["id"], overrides={"export": {"resolution": 1080, "resolution_mode": "1080"}}
+    )
+
+    # when
+    loaded = client.get(f"/api/projects/{project['id']}/settings")
+
+    # then the pipeline sees a valid class target without a database edit
+    assert loaded.status_code == 200
+    export = loaded.json()["resolved"]["export"]
+    assert export["resolution_mode"] == "class"
+    assert export["resolution"] == 1080
+
+
 def test_preview_uses_the_requested_layout_and_reports_tracked_geometry(
     client, project, repos, storage, monkeypatch
 ):
